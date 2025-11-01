@@ -1,0 +1,20 @@
+# 双向实时同声传译系统 - 依赖包
+
+# 音频处理
+sounddevice==0.4.6
+numpy>=1.26.0  # Python 3.12 兼容
+# pyaudio==0.2.13  # 不支持 Python 3.12，且代码中未使用，已移除
+
+# 火山引擎API
+websockets==12.0
+protobuf>=5.0.0  # Python 3.12 需要 5.x+
+
+# GUI界面
+PyQt5==5.15.10
+# tkinter是Python内置的,不需要单独安装
+
+# 语音活动检测
+webrtcvad==2.0.10
+
+# 工具库
+pyyaml==6.0.1
