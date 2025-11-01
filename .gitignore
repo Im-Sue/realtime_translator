@@ -1,5 +1,9 @@
-config.yaml
+**.yaml
 
 **.log
 
 tests/**
+
+**/__pycache__/**
+
+**/python_protogen/**
