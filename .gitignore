@@ -1,9 +1,19 @@
+# 配置相关
 **.yaml
 
+# 日志相关
 **.log
 
+# 测试相关
 tests/**
 
+# 缓存相关
 **/__pycache__/**
 
+# 火山引擎protobuf相关
 **/python_protogen/**
+
+# 打包相关
+**.spec
+**/build/**
+**/dist/**

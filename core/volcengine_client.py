@@ -35,8 +35,18 @@ FATAL_ERRORS = {
 }
 
 # 导入火山引擎protobuf定义
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(os.path.dirname(current_dir))
+# 支持 PyInstaller 打包后的路径
+def get_base_path():
+    """获取基础路径（支持 PyInstaller 打包）"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包后，数据文件在 sys._MEIPASS 目录
+        return sys._MEIPASS
+    else:
+        # 开发环境
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.dirname(os.path.dirname(current_dir))
+
+project_root = get_base_path()
 # 将 ast_python 目录添加到路径，而不是 python_protogen
 ast_python_path = os.path.join(project_root, "ast_python_client", "ast_python")
 

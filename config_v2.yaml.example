@@ -1,0 +1,138 @@
+# 实时同声传译器 v2.0 配置文件
+# 双向翻译（耳机模式）
+
+# 火山引擎配置 申请地址：https://console.volcengine.com/speech/service/10030?AppID=5658544683
+volcengine:
+  ws_url: "wss://openspeech.bytedance.com/api/v4/ast/v2/translate"
+  app_key: "123456"  # 用户的app_key
+  access_key: "asdghlhgg"  # 用户的access_key
+  resource_id: "volc.service_type.10053"  # 同声传译2.0资源ID
+
+# 音频配置
+audio:
+  # 麦克风配置（用户说话）
+  microphone:
+    device: "麦克风"  # 你的麦克风设备名称
+    sample_rate: 16000  # 火山引擎要求16kHz
+    channels: 1  # 单声道
+    chunk_size: 1600  # 100ms @ 16kHz
+
+  # 系统音频配置（对方说话）
+  system_audio:
+    device: "立体声混音"  # 首选：Windows立体声混音 (Realtek(R) Audio)
+    fallback_device: "Microsoft 声音映射器 - Input"  # 备选：立体声混音的系统别名
+    sample_rate: 16000  # 火山引擎要求16kHz
+    channels: 1  # 单声道
+    chunk_size: 1600  # 100ms @ 16kHz
+
+  # VB-CABLE输出配置（给Zoom的英文音频）
+  vbcable_output:
+    device: "CABLE Input"  # VB-CABLE输入端
+    sample_rate: 24000  # 火山引擎输出24kHz
+    use_ffmpeg: true  # 使用FFmpeg解码Ogg Opus
+    monitor_device: null  # 耳机模式不需要监听
+    enable_monitor: false  # 禁用监听输出
+
+# 翻译通道配置
+channels:
+  # Channel 1: 中文 → 英文（语音）
+  zh_to_en:
+    mode: "s2s"  # speech to speech
+    source_language: "zh"  # 中文
+    target_language: "en"  # 英文
+    enabled: true
+
+  # Channel 2: 英文 → 中文（文本）
+  en_to_zh:
+    mode: "s2t"  # speech to text
+    source_language: "en"  # 英文
+    target_language: "zh"  # 中文
+    enabled: true
+
+# 字幕窗口配置
+subtitle_window:
+  enabled: true  # 启用字幕窗口
+  width: 600  # 窗口宽度（竖向布局,窄一些）
+  height: 800  # 窗口高度（竖向布局,高一些,可显示更多内容）
+  font_size: 14  # 字体大小（pt,略小以显示更多文本）
+  bg_color: "#000000"  # 背景色（黑色）
+  text_color: "#FFFFFF"  # 文字色（白色）
+  opacity: 0.85  # 不透明度（85%,略提高可读性）
+  position: "top_right"  # 位置（右上角,不挡屏幕中央）
+  max_history: 1000  # 最大历史记录条数（显示最近10条翻译）
+  show_timestamp: false  # 是否显示时间戳（true显示[HH:MM:SS]）
+  # 可选位置: top_center, bottom_center, top_left, top_right
+  # 推荐: top_right 或 top_left (竖向布局放侧边更合适)
+  # 注意: 竖向布局(宽400高800)适合显示多行历史记录
+  #       横向布局(宽800高100)只能显示当前字幕
+
+# 日志配置
+logging:
+  level: "INFO"  # 日志级别: DEBUG, INFO, WARNING, ERROR
+  file: "realtime_translator_v2.log"  # 日志文件
+  max_size: 10485760  # 10MB
+  backup_count: 5  # 保留5个备份
+
+# 性能配置
+performance:
+  max_latency: 6.0  # 最大端到端延迟（秒）
+  audio_queue_size: 100  # 音频队列大小
+  result_queue_size: 100  # 结果队列大小
+
+# 使用说明
+# =============================================================================
+#
+# 【核心功能】
+# Channel 1 (你→对方): 麦克风(中文) → 火山引擎(s2s) → VB-CABLE(英文) → Zoom → 对方听英文
+# Channel 2 (对方→你): Zoom(英文) → 系统音频 → 火山引擎(s2t) → 字幕窗口(中文) → 你看中文字幕
+#
+# 【运行方式】
+# python main_v2.py
+#
+# 【重要配置】
+# 1. 🎧 必须使用耳机！避免扬声器声音被麦克风捕获形成回声
+# 2. ✅ Zoom麦克风：CABLE Output (VB-Audio Virtual Cable)
+#
+# 【Channel 2音频捕获方案（二选一）】
+#
+# 方案A: 立体声混音方案（推荐，简单）
+# ✅ 适用于: 使用Realtek声卡的有线耳机/音箱
+# ✅ 配置步骤:
+#    1. 启用Windows立体声混音（右键音量→声音→录制→启用"立体声混音"）
+#    2. Zoom扬声器：Speakers (Realtek HD Audio output) 或默认扬声器
+#    3. config_v2.yaml保持默认配置（使用立体声混音）
+#    4. 连接有线耳机到Realtek声卡接口
+# ✅ 优点: 配置简单，音质最好，无延迟
+# ❌ 缺点: 无法使用蓝牙音箱（立体声混音只能捕获同一声卡输出）
+#
+# 方案B: VB-CABLE B + 监听方案
+# ✅ 适用于: 想使用蓝牙音箱/耳机的用户
+# ✅ 配置步骤:
+#    1. Zoom扬声器：CABLE In 16 Ch (VB-Audio Virtual Cable)
+#    2. 修改本文件:
+#       audio:
+#         system_audio:
+#           device: "CABLE Output"  # 改为VB-CABLE Output
+#    3. 设置Windows监听（让你能听到声音）:
+#       - 右键"CABLE Output" → 属性 → "侦听"标签
+#       - 勾选"侦听此设备"
+#       - "通过此设备播放" → 选择你的蓝牙音箱
+# ✅ 优点: 支持蓝牙音箱，灵活性高
+# ❌ 缺点: 配置较复杂，可能有轻微延迟
+#
+# 【音频路径对比】
+# 方案A: Zoom → Realtek声卡 → 有线耳机（你听到） + 立体声混音（程序捕获）
+# 方案B: Zoom → CABLE Input → CABLE Output → 程序捕获 + Windows侦听 → 蓝牙音箱（你听到）
+#
+# 【字幕窗口操作】
+# - 左键拖动：移动窗口位置
+# - 双击：切换字体大小（20pt ↔ 26pt）
+# - ESC键：隐藏/显示窗口
+#
+# 【VB-CABLE 安装】
+# 下载地址: https://vb-audio.com/Cable/
+#
+# 【日志文件】
+# realtime_translator_v2.log（自动创建，UTF-8编码）
+#
+# =============================================================================

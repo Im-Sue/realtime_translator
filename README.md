@@ -101,7 +101,7 @@
 
 **注意**: 立体声混音配置仅在实现双向翻译时需要(v2.0计划中功能)
 
-### 4. 安装Python依赖
+### 4. 安装Python依赖 
 
 ```bash
 cd realtime_translator
