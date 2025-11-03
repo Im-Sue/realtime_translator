@@ -67,8 +67,15 @@ class SubtitleWindow:
         self.is_large_font = False
         self.current_font_size = font_size
 
-        # 历史记录
-        self.subtitle_history = deque(maxlen=max_history)
+        # 🆕 双缓冲区架构
+        # 缓冲区1: 原始流式数据（完整记录火山引擎的所有输出）
+        self.raw_buffer = deque(maxlen=max_history * 10)  # 保留更多原始数据用于调试
+
+        # 缓冲区2: 最终展示数据（智能去重后的结果）
+        self.display_buffer = deque(maxlen=max_history)
+
+        # 向后兼容：保留 subtitle_history 作为 display_buffer 的别名
+        self.subtitle_history = self.display_buffer
 
         # 拖动相关
         self.drag_x = 0
@@ -211,10 +218,165 @@ class SubtitleWindow:
             # 自动滚动到底部
             self.text_widget.see(tk.END)
 
+    def _extract_text_content(self, entry: str) -> str:
+        """
+        提取字幕条目的纯文本内容(去除时间戳)
+
+        Args:
+            entry: 字幕条目(可能包含时间戳)
+
+        Returns:
+            纯文本内容
+        """
+        if self.show_timestamp and entry.startswith('['):
+            # 格式: [HH:MM:SS] text
+            # 找到第一个 ] 后的内容
+            idx = entry.find(']')
+            if idx != -1:
+                return entry[idx + 1:].strip()
+        return entry.strip()
+
+    def _is_text_similar(self, text1: str, text2: str, threshold: float = 0.7) -> bool:
+        """
+        判断两个文本是否相似(包含关系或高重叠度)
+
+        Args:
+            text1: 文本1
+            text2: 文本2
+            threshold: 相似度阈值 (0.0-1.0)
+
+        Returns:
+            是否相似
+        """
+        if not text1 or not text2:
+            return False
+
+        # 完全相同
+        if text1 == text2:
+            return True
+
+        # 包含关系(一个是另一个的子串)
+        if text1 in text2 or text2 in text1:
+            return True
+
+        # 前缀匹配(新文本是旧文本的扩展)
+        if text2.startswith(text1) or text1.startswith(text2):
+            return True
+
+        # 字符重叠度计算(防止完全不同的文本被误判)
+        text1_chars = set(text1)
+        text2_chars = set(text2)
+        common_chars = text1_chars & text2_chars
+
+        if not common_chars:
+            return False
+
+        # 计算重叠率(使用Jaccard相似度)
+        overlap_ratio = len(common_chars) / len(text1_chars | text2_chars)
+        return overlap_ratio >= threshold
+
+    def _is_english_text(self, text: str) -> bool:
+        """
+        判断文本是否主要为英文
+
+        Args:
+            text: 待检测文本
+
+        Returns:
+            是否为英文文本
+        """
+        if not text:
+            return False
+
+        # 统计拉丁字母和中文字符
+        latin_chars = sum(1 for c in text if c.isalpha() and ord(c) < 128)
+        chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+
+        total_chars = latin_chars + chinese_chars
+
+        if total_chars == 0:
+            return False
+
+        # 如果拉丁字母占比超过50%,认为是英文
+        return (latin_chars / total_chars) > 0.5
+
+    def _check_merge_candidates(self, current_text: str, lookback_count: int = 10) -> int:
+        """
+        检查新文本是否为最近N条的合并结果
+        🔧 修复: 只合并连续的片段，遇到完整句子就停止（避免删除历史完整内容）
+
+        Args:
+            current_text: 当前新文本
+            lookback_count: 向前检查的条数
+
+        Returns:
+            应该删除的旧条目数量(0表示不需要合并)
+        """
+        if not self.subtitle_history or len(current_text) < 3:
+            return 0
+
+        # 向前检查最近N条
+        check_count = min(lookback_count, len(self.subtitle_history))
+        # 🔧 修复: 将deque转为list再切片,避免切片索引错误
+        recent_entries = list(self.subtitle_history)[-check_count:]
+
+        # 提取纯文本
+        recent_texts = [self._extract_text_content(entry) for entry in recent_entries]
+
+        # 🔧 新增: 从最近的条目往前找，只考虑连续的片段（遇到完整句子就停止）
+        max_fragment_count = 0
+        for i in range(len(recent_texts) - 1, -1, -1):
+            text = recent_texts[i]
+            # 检查是否为完整句子（≥8字符，去除标点和空格）
+            clean_text = text.replace(" ", "").replace("，", "").replace("。", "").replace("、", "")
+            if len(clean_text) >= 8:
+                # 遇到完整句子，停止（只考虑之后的片段）
+                max_fragment_count = len(recent_texts) - 1 - i
+                break
+        else:
+            # 全部都是片段
+            max_fragment_count = len(recent_texts)
+
+        # 如果没有找到任何片段，直接返回
+        if max_fragment_count == 0:
+            return 0
+
+        # 尝试不同长度的合并窗口(从长到短)，但不超过max_fragment_count
+        for merge_count in range(min(max_fragment_count, check_count), 1, -1):
+            # 取最近的merge_count条
+            texts_to_merge = recent_texts[-merge_count:]
+
+            # 合并这些文本(去除空格)
+            merged = "".join(texts_to_merge).replace(" ", "")
+            current_clean = current_text.replace(" ", "")
+
+            # 检查合并后的文本是否在新文本中
+            if merged in current_clean or current_clean in merged:
+                # 检查重叠度(避免误判)
+                overlap = len(merged) / max(len(merged), len(current_clean))
+                if overlap > 0.6:  # 至少60%重叠
+                    logger.debug(
+                        f"🔗 检测到合并: {merge_count}条片段 → '{current_text[:30]}...' "
+                        f"(重叠度: {overlap:.1%})"
+                    )
+                    return merge_count
+
+        return 0
+
     def update_subtitle(self, text: str):
         """
-        更新字幕文本(线程安全)
-        新字幕会添加到历史记录,显示最近的几条
+        更新字幕文本(线程安全) - 双缓冲区架构
+
+        数据流:
+        1. 所有输入先记录到 raw_buffer (原始数据，完整记录)
+        2. 智能去重逻辑处理后写入 display_buffer (展示数据)
+        3. 字幕窗口从 display_buffer 读取显示
+
+        智能去重功能:
+        - 完全相同的文本会被跳过
+        - 如果新文本是最近多条的合并,会删除旧条目并添加新的
+        - 包含关系或扩展文本会覆盖前一条
+        - 完全不同的文本会作为新条目添加
 
         Args:
             text: 字幕文本
@@ -222,15 +384,117 @@ class SubtitleWindow:
         if not text or not text.strip():
             return
 
-        # 添加时间戳(可选)
+        # 提取纯文本内容用于比较
+        current_text = text.strip()
+
+        # 构建新条目
         if self.show_timestamp:
             timestamp = datetime.now().strftime("%H:%M:%S")
-            entry = f"[{timestamp}] {text}"
+            new_entry = f"[{timestamp}] {text}"
         else:
-            entry = text
+            new_entry = text
 
-        # 添加到历史记录
-        self.subtitle_history.append(entry)
+        # 🆕 步骤1: 先记录到原始缓冲区（保留所有火山引擎输出）
+        self.raw_buffer.append({
+            'timestamp': datetime.now(),
+            'text': current_text,
+            'entry': new_entry
+        })
+
+        # 智能去重和合并逻辑
+        if self.subtitle_history:
+            # 步骤0: 检查是否为英文翻译(火山引擎模式: 中文片段 → 完整中文 → 英文)
+            if self._is_english_text(current_text):
+                # 检查最近的条目是否都是中文片段（而非完整句子）
+                # 策略：只删除短文本（<8字符）的连续中文，保留完整句子
+                recent_count = min(10, len(self.subtitle_history))
+                fragment_count = 0  # 片段计数
+
+                for i in range(recent_count):
+                    entry_text = self._extract_text_content(self.subtitle_history[-(i+1)])
+
+                    # 如果是英文，停止
+                    if self._is_english_text(entry_text):
+                        break
+
+                    # 如果是中文，判断是否为片段
+                    # 片段特征：文本很短（<8字符，排除标点和空格）
+                    clean_text = entry_text.replace(" ", "").replace("，", "").replace("。", "").replace("、", "")
+                    if len(clean_text) < 8:
+                        fragment_count += 1
+                    else:
+                        # 遇到完整句子，停止（不删除历史完整句子）
+                        break
+
+                # 如果之前有连续的中文片段（非完整句子），清理它们
+                if fragment_count >= 2:
+                    logger.debug(
+                        f"🌐 检测到英文翻译,清理前{fragment_count}条中文片段 "
+                        f"→ '{current_text[:40]}...'"
+                    )
+                    # 删除连续的中文片段
+                    for _ in range(fragment_count):
+                        self.subtitle_history.pop()
+
+                    # 添加英文翻译
+                    self.subtitle_history.append(new_entry)
+                    # 更新显示后直接返回
+                    display_text = "\n\n".join(self.subtitle_history)
+                    if self.window and self.text_widget:
+                        self.window.after(0, lambda: self._update_text_widget(display_text))
+                    return
+
+            # 步骤1: 检查是否为多条合并结果
+            merge_count = self._check_merge_candidates(current_text, lookback_count=10)
+
+            if merge_count > 0:
+                # 删除最近的merge_count条,添加新的合并文本
+                removed_texts = [
+                    self._extract_text_content(self.subtitle_history[-i])
+                    for i in range(merge_count, 0, -1)
+                ]
+                logger.debug(
+                    f"🔗 合并字幕: {merge_count}条 "
+                    f"({' + '.join([t[:5] + '...' if len(t) > 5 else t for t in removed_texts[:3]])}...) "
+                    f"→ '{current_text[:30]}...'"
+                )
+
+                # 删除旧条目
+                for _ in range(merge_count):
+                    self.subtitle_history.pop()
+
+                # 添加新的合并文本
+                self.subtitle_history.append(new_entry)
+
+            else:
+                # 步骤2: 没有多条合并,检查与最后一条的关系
+                last_entry = self.subtitle_history[-1]
+                last_text = self._extract_text_content(last_entry)
+
+                # 情况1: 完全相同 → 跳过(避免重复)
+                if last_text == current_text:
+                    logger.debug(f"🔄 字幕重复,跳过: '{current_text[:30]}...'")
+                    return
+
+                # 情况2: 文本相似(包含/扩展/高重叠) → 覆盖
+                if self._is_text_similar(last_text, current_text):
+                    # 保留较长的文本(通常是更完整的版本)
+                    if len(current_text) >= len(last_text):
+                        # 覆盖最后一条
+                        self.subtitle_history[-1] = new_entry
+                        logger.debug(f"📝 字幕覆盖: '{last_text[:20]}...' → '{current_text[:20]}...'")
+                    else:
+                        # 新文本更短,保持原有文本不变
+                        logger.debug(f"⏭️  字幕较短,跳过: '{current_text[:30]}...'")
+                        return
+                else:
+                    # 情况3: 完全不同 → 新增
+                    self.subtitle_history.append(new_entry)
+                    logger.debug(f"➕ 新字幕: '{current_text[:30]}...'")
+        else:
+            # 第一条字幕,直接添加
+            self.subtitle_history.append(new_entry)
+            logger.debug(f"🆕 首条字幕: '{current_text[:30]}...'")
 
         # 构建显示内容(最近的N条记录)
         display_text = "\n\n".join(self.subtitle_history)
@@ -254,6 +518,27 @@ class SubtitleWindow:
                 logger.info("🛑 字幕窗口已关闭")
             except Exception as e:
                 logger.warning(f"⚠️  关闭字幕窗口时出错: {e}")
+
+    def get_raw_history(self) -> list:
+        """
+        获取原始缓冲区历史（完整的火山引擎输出流）
+
+        Returns:
+            原始历史记录列表，每个元素包含:
+            - timestamp: 时间戳
+            - text: 纯文本内容
+            - entry: 格式化后的条目
+        """
+        return list(self.raw_buffer)
+
+    def get_display_history(self) -> list:
+        """
+        获取展示缓冲区历史（智能去重后的结果）
+
+        Returns:
+            展示历史记录列表
+        """
+        return list(self.display_buffer)
 
     def get_stats(self) -> dict:
         """

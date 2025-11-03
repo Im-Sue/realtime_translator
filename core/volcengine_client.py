@@ -15,6 +15,25 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# 错误分类: 可重试的临时性错误
+RETRYABLE_ERRORS = {
+    "Engine:1022",  # 模型推理错误
+    "ServerInternalError",  # 服务器内部错误
+    "Model inference error",  # 模型推理错误
+    "timeout",  # 超时
+    "network",  # 网络错误
+    "connection",  # 连接错误
+}
+
+# 错误分类: 不可重试的永久性错误
+FATAL_ERRORS = {
+    "authentication",  # 认证失败
+    "quota",  # 配额超限
+    "invalid_parameter",  # 参数错误
+    "invalid_app_key",  # 应用密钥无效
+    "invalid_access_key",  # 访问密钥无效
+}
+
 # 导入火山引擎protobuf定义
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
@@ -62,7 +81,11 @@ class VolcengineTranslator:
         mode: str = "s2s",
         source_language: str = "zh",
         target_language: str = "en",
-        result_callback: Optional[Callable] = None
+        result_callback: Optional[Callable] = None,
+        auto_reconnect: bool = True,
+        max_retry_attempts: int = 3,
+        retry_delay_base: float = 1.0,
+        failure_callback: Optional[Callable] = None
     ):
         """
         初始化翻译客户端
@@ -73,12 +96,22 @@ class VolcengineTranslator:
             source_language: 源语言 ("zh"=中文, "en"=英文)
             target_language: 目标语言
             result_callback: 结果回调函数
+            auto_reconnect: 是否自动重连 (默认True)
+            max_retry_attempts: 最大重试次数 (默认3)
+            retry_delay_base: 重试基础延迟(秒) (默认1.0, 使用指数退避)
+            failure_callback: 失败回调函数(重试失败后调用)
         """
         self.config = config
         self.mode = mode
         self.source_language = source_language
         self.target_language = target_language
         self.result_callback = result_callback
+        self.failure_callback = failure_callback
+
+        # 自动重连配置
+        self.auto_reconnect = auto_reconnect
+        self.max_retry_attempts = max_retry_attempts
+        self.retry_delay_base = retry_delay_base
 
         self.conn = None
         self.session_id = None
@@ -299,6 +332,21 @@ class VolcengineTranslator:
                 logger.error(f"❌ 会话失败: {result.error_message}")
                 self.is_session_active = False
 
+                # 🆕 自动重连逻辑
+                if self.auto_reconnect:
+                    logger.warning("🔄 启动自动恢复...")
+                    recovery_success = await self._attempt_recovery(result.error_message)
+
+                    if recovery_success:
+                        logger.info("✅ 自动恢复成功,会话已重启")
+                        # 更新result标记,表明已恢复
+                        result.is_failed = False
+                        result.error_message = "已自动恢复"
+                    else:
+                        logger.error("❌ 自动恢复失败,会话终止")
+                else:
+                    logger.warning("⚠️  自动重连已禁用,会话终止")
+
             # 调用回调
             if self.result_callback and response.event != Type.UsageResponse:
                 self.result_callback(result)
@@ -308,6 +356,94 @@ class VolcengineTranslator:
         except Exception as e:
             logger.error(f"❌ 接收结果失败: {e}")
             return None
+
+    def _should_retry(self, error_msg: str) -> bool:
+        """
+        判断错误是否应该重试
+
+        Args:
+            error_msg: 错误消息
+
+        Returns:
+            是否应该重试
+        """
+        if not error_msg:
+            return False
+
+        error_lower = error_msg.lower()
+
+        # 检查是否为致命错误(不可重试)
+        if any(fatal in error_lower for fatal in FATAL_ERRORS):
+            logger.warning(f"⚠️  检测到致命错误,不可重试: {error_msg}")
+            return False
+
+        # 检查是否为可重试错误
+        if any(retry in error_msg for retry in RETRYABLE_ERRORS):
+            logger.info(f"✅ 检测到可重试错误: {error_msg}")
+            return True
+
+        # 默认: 未知错误,谨慎处理,不重试
+        logger.warning(f"⚠️  未知错误类型,默认不重试: {error_msg}")
+        return False
+
+    async def _attempt_recovery(self, error: str) -> bool:
+        """
+        尝试恢复会话(自动重连)
+
+        Args:
+            error: 错误消息
+
+        Returns:
+            是否恢复成功
+        """
+        # 检查是否应该重试
+        if not self._should_retry(error):
+            logger.error(f"❌ 错误不可重试,放弃恢复")
+            return False
+
+        logger.info(f"🔄 开始自动恢复流程...")
+
+        for attempt in range(1, self.max_retry_attempts + 1):
+            try:
+                # 指数退避延迟
+                delay = self.retry_delay_base * (2 ** (attempt - 1))
+                logger.warning(
+                    f"🔄 尝试重启会话 ({attempt}/{self.max_retry_attempts})..."
+                )
+                logger.info(f"⏳ 等待 {delay:.1f}秒...")
+
+                await asyncio.sleep(delay)
+
+                # 检查WebSocket是否还连接
+                if not self.is_connected or not self.conn:
+                    logger.info("🔌 重新建立WebSocket连接...")
+                    await self.connect()
+
+                # 重启会话
+                logger.info("📡 重新启动翻译会话...")
+                await self.start_session()
+
+                logger.info(f"✅ 会话恢复成功!")
+                return True
+
+            except Exception as e:
+                logger.error(
+                    f"❌ 恢复失败 ({attempt}/{self.max_retry_attempts}): {e}"
+                )
+
+                if attempt == self.max_retry_attempts:
+                    logger.error("❌ 已达最大重试次数,会话无法恢复")
+
+                    # 调用失败回调(如果有)
+                    if self.failure_callback:
+                        try:
+                            self.failure_callback(error)
+                        except Exception as callback_error:
+                            logger.error(f"❌ 失败回调执行出错: {callback_error}")
+
+                    return False
+
+        return False
 
     async def finish_session(self):
         """结束翻译会话"""

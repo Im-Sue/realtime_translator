@@ -164,7 +164,7 @@ class DualChannelTranslator:
             text_color=subtitle_config.get('text_color', '#FFFFFF'),
             opacity=subtitle_config.get('opacity', 0.85),
             position=subtitle_config.get('position', 'top_right'),
-            max_history=subtitle_config.get('max_history', 10),
+            max_history=subtitle_config.get('max_history', 1000),
             show_timestamp=subtitle_config.get('show_timestamp', False)
         )
 
@@ -306,17 +306,28 @@ class DualChannelTranslator:
                             # 处理文本
                             if result.text:
                                 self.stats['ch1_text_segments'] += 1
-                                logger.info(f"📝 [CH1-{self.stats['ch1_text_segments']}] 英文: {result.text}")
+                                # 详细日志改为DEBUG级别
+                                logger.debug(f"📝 [CH1-{self.stats['ch1_text_segments']}] 英文: {result.text}")
+
+                                # 每20条记录一次摘要
+                                if self.stats['ch1_text_segments'] % 20 == 0:
+                                    logger.info(f"📊 Channel 1 进度: 已接收 {self.stats['ch1_text_segments']} 条文本")
 
                             # 处理音频
                             if result.audio_data:
                                 self.stats['ch1_audio_received'] += 1
                                 self.stats['total_ch1_audio_bytes'] += len(result.audio_data)
 
-                                logger.info(
+                                # 详细日志改为DEBUG级别
+                                logger.debug(
                                     f"🔊 [CH1] 音频块 [{self.stats['ch1_audio_received']}] "
                                     f"{len(result.audio_data)} bytes"
                                 )
+
+                                # 每50个音频块记录一次摘要
+                                if self.stats['ch1_audio_received'] % 50 == 0:
+                                    mb = self.stats['total_ch1_audio_bytes'] / 1024 / 1024
+                                    logger.info(f"📊 Channel 1 音频: 已接收 {self.stats['ch1_audio_received']} 块, 共 {mb:.2f}MB")
 
                                 # 播放音频到 VB-CABLE
                                 self.audio_player.play(result.audio_data)
@@ -362,7 +373,12 @@ class DualChannelTranslator:
                             # 处理文本
                             if result.text:
                                 self.stats['ch2_text_segments'] += 1
-                                logger.info(f"📝 [CH2-{self.stats['ch2_text_segments']}] 中文: {result.text}")
+                                # 详细日志改为DEBUG级别
+                                logger.debug(f"📝 [CH2-{self.stats['ch2_text_segments']}] 中文: {result.text}")
+
+                                # 每20条记录一次摘要
+                                if self.stats['ch2_text_segments'] % 20 == 0:
+                                    logger.info(f"📊 Channel 2 进度: 已接收 {self.stats['ch2_text_segments']} 条字幕")
 
                                 # 更新字幕窗口
                                 self.subtitle_window_thread.update_subtitle(result.text)
