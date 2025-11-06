@@ -11,7 +11,13 @@ from typing import Optional, Callable
 import websockets
 from websockets import Headers
 import sys
-import os
+from pathlib import Path
+
+# 确保项目根目录在 Python 路径中（支持不同的运行方式）
+_current_dir = Path(__file__).parent
+_project_root = _current_dir.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 logger = logging.getLogger(__name__)
 
@@ -34,30 +40,13 @@ FATAL_ERRORS = {
     "invalid_access_key",  # 访问密钥无效
 }
 
-# 导入火山引擎protobuf定义
-# 支持 PyInstaller 打包后的路径
-def get_base_path():
-    """获取基础路径（支持 PyInstaller 打包）"""
-    if getattr(sys, 'frozen', False):
-        # PyInstaller 打包后，数据文件在 sys._MEIPASS 目录
-        return sys._MEIPASS
-    else:
-        # 开发环境
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.dirname(os.path.dirname(current_dir))
+# 导入火山引擎protobuf定义（内部集成版本）
+from realtime_translator.pb2.products.understanding.ast.ast_service_pb2 import (
+    TranslateRequest, TranslateResponse
+)
+from realtime_translator.pb2.common.events_pb2 import Type
 
-project_root = get_base_path()
-# 将 ast_python 目录添加到路径，而不是 python_protogen
-ast_python_path = os.path.join(project_root, "ast_python_client", "ast_python")
-
-if os.path.exists(ast_python_path):
-    sys.path.insert(0, ast_python_path)
-    from python_protogen.products.understanding.ast.ast_service_pb2 import TranslateRequest, TranslateResponse
-    from python_protogen.common.events_pb2 import Type
-    logger.info("✅ 成功导入火山引擎protobuf定义")
-else:
-    logger.error(f"❌ 未找到ast_python路径: {ast_python_path}")
-    raise ImportError("请确保ast_python_client目录存在")
+logger.info("✅ 成功导入火山引擎protobuf定义（内部版本）")
 
 
 @dataclass
