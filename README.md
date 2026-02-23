@@ -131,7 +131,7 @@ Zoom扬声器 → 系统音频/VB-CABLE → SystemAudioCapturer → VolcengineTr
   - 下载地址: [https://vb-audio.com/Cable/](https://vb-audio.com/Cable/)
   - 用途: 将翻译后的英文音频传递给Zoom
 
-- **FFmpeg** (可选，推荐)
+- **FFmpeg** 
   - 用于Ogg Opus音频解码
   - 提升音质和解码性能
 

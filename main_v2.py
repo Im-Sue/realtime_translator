@@ -124,25 +124,33 @@ class DualChannelTranslator:
         # 3. 音频播放器 (Channel 1 输出 → VB-CABLE)
         logger.info("\n📍 初始化 Channel 1 输出...")
 
+        vbcable_config = audio_config['vbcable_output']
+
         # 查找 VB-CABLE Input 设备
         devices = sd.query_devices()
         cable_input_idx = None
-        for i, device in enumerate(devices):
-            if 'CABLE Input' in device['name'] and device['max_output_channels'] > 0:
-                cable_input_idx = i
-                logger.info(f"✅ 找到 VB-CABLE Input: [{i}] {device['name']}")
+        config_device_name = vbcable_config.get('device', 'CABLE Input')
+        # 搜索关键词: 配置文件中的设备名 + 常见VB-CABLE变体
+        cable_keywords = [config_device_name, 'CABLE Input', 'CABLE In']
+        for keyword in cable_keywords:
+            if cable_input_idx is not None:
                 break
+            for i, device in enumerate(devices):
+                if keyword in device['name'] and device['max_output_channels'] > 0:
+                    cable_input_idx = i
+                    logger.info(f"✅ 找到 VB-CABLE Input: [{i}] {device['name']} (匹配关键词: '{keyword}')")
+                    break
 
         if cable_input_idx is None:
             logger.warning("⚠️  未找到 VB-CABLE Input 设备!")
             logger.warning("   将使用默认扬声器作为输出(测试模式)")
             logger.warning("   如需 Zoom 集成，请安装 VB-CABLE: https://vb-audio.com/Cable/")
+            logger.warning(f"   已搜索关键词: {cable_keywords}")
             cable_input_idx = sd.default.device[1]
 
         cable_input_device = devices[cable_input_idx]['name']
         logger.info(f"🔊 Channel 1 输出设备: {cable_input_device}")
 
-        vbcable_config = audio_config['vbcable_output']
         self.audio_player = OggOpusPlayer(
             device_name=cable_input_device,
             sample_rate=24000,
