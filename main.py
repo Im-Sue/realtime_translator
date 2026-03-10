@@ -70,7 +70,7 @@ class DualChannelTranslator:
             logger.info(f"✅ 配置文件加载成功: {config_path}")
         except FileNotFoundError:
             logger.error(f"❌ 配置文件未找到: {config_path}")
-            logger.error("   请从 config.yaml 复制一份并重命名为 config_v2.yaml")
+            logger.error("   请从 config.yaml.example 复制一份并命名为 config.yaml")
             raise
 
         self.is_running = False
