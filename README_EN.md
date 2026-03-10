@@ -1,16 +1,18 @@
 # Real-Time Simultaneous Interpreter
 
-[![Version](https://img.shields.io/badge/version-2.0-blue.svg)](https://github.com/yourusername/simultaneous_interpretation)
+[![Version](https://img.shields.io/badge/version-3.0-blue.svg)](https://github.com/Im-Sue/simultaneous_interpretation)
 [![Python](https://img.shields.io/badge/python-3.8+-green.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Custom-orange.svg)](#license)
 
-🎙️ Real-time bidirectional simultaneous interpretation system based on Volcengine, supporting Chinese-English translation, optimized for online meeting scenarios like Zoom.
+> [中文](README.md) | English
 
-> [中文文档](README.md) | English
+Real-time bidirectional simultaneous interpretation system based on Volcengine, supporting Chinese-English translation, optimized for online meeting scenarios like Zoom. Supports Windows and macOS.
 
-## ✨ Core Features
+**If this project helped you in an interview or at work, please leave positive feedback in Issues. Thank you for your support!**
 
-### 🚀 v2.0 Bidirectional Translation (Headphone Mode)
+## Core Features
+
+### Bidirectional Translation (Headphone Mode)
 
 - **Dual-Channel Independent Concurrent Execution**
   - **Channel 1**: Microphone(Chinese) → Volcengine(S2S) → VB-CABLE(English) → Zoom → Other party hears English
@@ -24,8 +26,13 @@
   - Semi-transparent floating window with drag and resize support
   - Double-click to toggle font size (14pt ↔ 20pt)
   - ESC key for quick hide/show
-  - Dual-buffer intelligent deduplication to avoid duplicate subtitles
+  - Intelligent subtitle aggregation and deduplication, English/Chinese displayed on separate lines
+  - Chinese text beautification (auto-spacing after punctuation)
   - History playback support (configurable retention count)
+
+- **Flexible Channel Control**
+  - Channel 1 can be disabled (subtitle-only mode: view translations without voice output)
+  - Set `zh_to_en.enabled: false` in `config.yaml`
 
 - **High-Performance Audio Processing**
   - 16kHz mono audio capture with low-latency transmission
@@ -33,13 +40,12 @@
   - Thread-safe audio queue management
   - Automatic audio device detection and fallback mechanism
 
-### 🔧 Technical Architecture
+### Technical Architecture
 
 #### Core Modules
 
 1. **Audio Capture Module** (`core/audio_capture.py`)
    - Microphone audio capture (user voice)
-   - System audio capture (other party's voice)
    - Automatic device detection and fallback support
    - Real-time audio stream buffering
 
@@ -58,88 +64,74 @@
 
 4. **Subtitle Window Module** (`gui/subtitle_window.py`)
    - Tkinter floating window
-   - Dual-buffer intelligent deduplication
+   - Intelligent text formatting and beautification
    - Configurable style and position
    - Timestamp display (optional)
    - Thread-safe updates
 
 5. **System Audio Capture** (`core/system_audio_capture.py`)
    - Windows Stereo Mix support
-   - VB-CABLE virtual audio device support
+   - macOS BlackHole virtual audio support
    - Multi-device fallback strategy
 
 #### Audio Path Flow
 
 ```
-【Channel 1 - You speak, they hear】
+[Channel 1 - You speak, they hear]
 Microphone → AudioCapturer → VolcengineTranslator(s2s) → OggOpusPlayer → VB-CABLE Input → Zoom Microphone
 
-【Channel 2 - They speak, you see】
-Zoom Speaker → System Audio/VB-CABLE → SystemAudioCapturer → VolcengineTranslator(s2t) → SubtitleWindow
+[Channel 2 - They speak, you see]
+Zoom Speaker → System Audio/Virtual Audio → SystemAudioCapturer → VolcengineTranslator(s2t) → SubtitleWindow
 ```
 
-## 🎯 Supported Platforms
+## Supported Platforms
+
+### Operating Systems
+
+- **Windows 10/11** - Fully supported (VB-CABLE + Stereo Mix)
+- **macOS** - Fully supported (requires [BlackHole](https://existential.audio/blackhole/))
 
 ### Online Meeting Software
 
-Through VB-CABLE virtual audio device, this system supports all meeting software that allows audio input device selection:
+Through virtual audio devices, this system supports all meeting software that allows audio input device selection:
 
-- ✅ **Zoom** - Fully supported, recommended
-- ✅ **Microsoft Teams** - Fully supported
-- ✅ **Tencent Meeting (腾讯会议)** - Fully supported
-- ✅ **Feishu/Lark (飞书)** - Fully supported
-- ✅ **DingTalk (钉钉)** - Fully supported
-- ✅ **Google Meet** - Fully supported
-- ✅ **Webex** - Fully supported
-- ✅ **Skype** - Fully supported
+- Zoom, Microsoft Teams, Tencent Meeting, Feishu/Lark, DingTalk, Google Meet, Webex, Skype
 
 ### Instant Messaging Software
 
 Also supports IM software with voice call features:
 
-- ✅ **Discord** - Voice channel support
-- ✅ **Telegram (Desktop)** - Voice call support
-- ✅ **WhatsApp (Desktop)** - Voice call support
-- ✅ **WeChat (PC)** - Voice/video call support
-- ✅ **QQ** - Voice/video call support
-- ✅ **Slack** - Voice call support
+- Discord, Telegram (Desktop), WhatsApp (Desktop), WeChat (PC), QQ, Slack
 
-**Configuration Method**: In each software's audio settings, set the microphone to **CABLE Output (VB-Audio Virtual Cable)**.
+**Configuration**: In each software's audio settings, set the microphone to **CABLE Output (VB-Audio Virtual Cable)**.
 
-## 📋 System Requirements
+## System Requirements
 
 ### Software Environment
 
-- **Operating System**: Windows 10/11
+- **Operating System**: Windows 10/11 or macOS
 - **Python**: 3.8+
-- **Dependencies**:
-  ```
-  asyncio
-  websockets
-  sounddevice
-  numpy
-  pyyaml
-  protobuf
-  tkinter (usually comes with Python)
-  ```
+- **Dependencies**: See `requirements.txt`
 
 ### Required Software
 
-- **VB-CABLE Virtual Audio Device**
-  - Download: [https://vb-audio.com/Cable/](https://vb-audio.com/Cable/)
-  - Purpose: Pass translated English audio to Zoom
+#### Windows
 
-- **FFmpeg** (Optional, Recommended)
-  - For Ogg Opus audio decoding
-  - Improves audio quality and decoding performance
+- **[VB-CABLE](https://vb-audio.com/Cable/)** - Virtual audio device to pass translated English audio to Zoom
+- **FFmpeg** - For Ogg Opus audio decoding
+
+#### macOS
+
+- **[BlackHole](https://existential.audio/blackhole/)** - Virtual audio device (alternative to VB-CABLE)
+- `use_ffmpeg` can be set to `false` on macOS
 
 ### Volcengine Configuration
 
 - Register Volcengine account: [https://www.volcengine.com/](https://www.volcengine.com/)
-- Enable "Simultaneous Interpretation 2.0" service
+- Enable "Simultaneous Interpretation 2.0" service: [https://console.volcengine.com/speech/service/10030](https://console.volcengine.com/speech/service/10030)
 - Obtain `app_key` and `access_key`
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Install Dependencies
 
@@ -147,34 +139,49 @@ Also supports IM software with voice call features:
 pip install -r requirements.txt
 ```
 
-### 2. Configure System
+### 2. Create Configuration File
 
-#### Option A: Stereo Mix Solution (Recommended for Wired Headphones)
+```bash
+cp config.yaml.example config.yaml
+```
+
+Edit `config.yaml` with your Volcengine credentials and audio device names.
+
+List available audio devices:
+
+```bash
+python scripts/list_devices.py
+```
+
+### 3. Configure Audio Devices
+
+#### Windows Setup
+
+**Option A: Stereo Mix (Recommended for wired headphones)**
 
 1. **Enable Windows Stereo Mix**
    - Right-click volume icon in taskbar → "Sound"
    - Switch to "Recording" tab
    - Right-click empty area → "Show Disabled Devices"
-   - Find "Stereo Mix"
-   - Right-click → "Enable"
+   - Find "Stereo Mix" → Right-click → "Enable"
 
 2. **Zoom Audio Settings**
    - Microphone: **CABLE Output (VB-Audio Virtual Cable)**
    - Speaker: **Speakers (Realtek HD Audio)** or default speaker
 
-3. **Connect wired headphones** to Realtek sound card port
+3. Connect wired headphones to Realtek sound card port
 
-#### Option B: VB-CABLE B Solution (For Bluetooth Speakers)
+**Option B: VB-CABLE B + Monitoring (For Bluetooth speakers)**
 
 1. **Zoom Audio Settings**
    - Microphone: **CABLE Output (VB-Audio Virtual Cable)**
    - Speaker: **CABLE Input (VB-Audio Virtual Cable)**
 
-2. **Modify configuration file** `config_v2.yaml`:
+2. **Modify configuration file** `config.yaml`:
    ```yaml
    audio:
      system_audio:
-       device: "CABLE Output"  # Change to VB-CABLE Output
+       device: "CABLE Output"
    ```
 
 3. **Set Windows Audio Monitoring**
@@ -182,67 +189,72 @@ pip install -r requirements.txt
    - Check "Listen to this device"
    - "Playback through this device" → Select your Bluetooth speaker
 
-### 3. Configure Volcengine
+#### macOS Setup
 
-Edit `realtime_translator/config_v2.yaml`:
+1. Install [BlackHole](https://existential.audio/blackhole/) (16ch version recommended)
 
-```yaml
-volcengine:
-  ws_url: "wss://openspeech.bytedance.com/api/v4/ast/v2/translate"
-  app_key: "your_app_key"
-  access_key: "your_access_key"
-  resource_id: "volc.service_type.10053"
-```
+2. Update device names in `config.yaml`:
+   ```yaml
+   audio:
+     microphone:
+       device: "MacBook Air Microphone"
+     system_audio:
+       device: "BlackHole 16ch"
+       fallback_device: "BlackHole 16ch"
+     vbcable_output:
+       device: "MacBook Air Speakers"
+       use_ffmpeg: false
+   ```
 
-### 4. Run Program
+3. **Zoom Audio Settings**
+   - Microphone: **BlackHole 16ch**
+   - Speaker: Default speaker
+
+### 4. Run
 
 ```bash
-cd realtime_translator
-python main_v2.py
+python main.py                    # Use default config.yaml
+python main.py my_config.yaml     # Use custom config file
 ```
 
-## ⚙️ Configuration Guide
+## Configuration
+
+All settings are in `config.yaml`. See `config.yaml.example` for detailed comments.
 
 ### Audio Configuration
 
 ```yaml
 audio:
-  # Microphone configuration
   microphone:
-    device: "Microphone"  # Your microphone device name
+    device: "Microphone"     # Your microphone device name
     sample_rate: 16000
     channels: 1
-    chunk_size: 1600  # 100ms @ 16kHz
+    chunk_size: 1600         # 100ms @ 16kHz
 
-  # System audio configuration
   system_audio:
-    device: "Stereo Mix"  # Option A: Stereo Mix
-    # device: "CABLE Output"  # Option B: VB-CABLE
+    device: "Stereo Mix"     # Windows: Stereo Mix / macOS: BlackHole 16ch
     fallback_device: "Microsoft Sound Mapper - Input"
     sample_rate: 16000
     channels: 1
 
-  # VB-CABLE output configuration
   vbcable_output:
-    device: "CABLE Input"
+    device: "CABLE Input"    # Windows: CABLE Input / macOS: Speaker name
     sample_rate: 24000
-    use_ffmpeg: true
+    use_ffmpeg: true         # Can be set to false on macOS
 ```
 
 ### Translation Channel Configuration
 
 ```yaml
 channels:
-  # Channel 1: Chinese → English (Speech)
   zh_to_en:
-    mode: "s2s"  # speech to speech
+    mode: "s2s"              # speech to speech
     source_language: "zh"
     target_language: "en"
-    enabled: true
+    enabled: true            # Set to false to disable (subtitle-only mode)
 
-  # Channel 2: English → Chinese (Text)
   en_to_zh:
-    mode: "s2t"  # speech to text
+    mode: "s2t"              # speech to text
     source_language: "en"
     target_language: "zh"
     enabled: true
@@ -253,27 +265,26 @@ channels:
 ```yaml
 subtitle_window:
   enabled: true
-  width: 600  # Window width
-  height: 800  # Window height (vertical layout)
-  font_size: 14  # Font size
-  bg_color: "#000000"  # Background color (black)
-  text_color: "#FFFFFF"  # Text color (white)
-  opacity: 0.85  # Opacity (85%)
-  position: "top_right"  # Position (top right)
-  max_history: 1000  # Maximum history count
-  show_timestamp: false  # Show timestamp
-
-  # Available positions: top_center, bottom_center, top_left, top_right
+  width: 600
+  height: 800
+  font_size: 14              # Double-click window to toggle size
+  bg_color: "#000000"
+  text_color: "#FFFFFF"
+  opacity: 0.85
+  position: "top_right"      # Options: top_center, bottom_center, top_left, top_right
+  max_history: 1000
+  show_timestamp: false
 ```
 
-## 🎮 User Guide
+## User Guide
 
 ### Startup Process
 
-1. **Start program**: `python main_v2.py`
-2. **Check devices**: Confirm microphone, speakers, VB-CABLE devices are correctly recognized
-3. **Wear headphones**: 🎧 **Important! Must use headphones to avoid echo**
-4. **Start Zoom**: Configure microphone as "CABLE Output"
+1. **Start program**: `python main.py`
+   - macOS convenience scripts: `bash scripts/healthcheck.sh` to check environment, `bash scripts/run.sh` to start
+2. **Check devices**: Confirm microphone, speakers, and virtual audio devices are correctly recognized
+3. **Wear headphones**: **Important! Must use headphones to avoid echo**
+4. **Start Zoom**: Set microphone to "CABLE Output" (Windows) or "BlackHole 16ch" (macOS)
 5. **Start translation**:
    - You speak Chinese → They hear English
    - They speak English → You see Chinese subtitles (top right corner)
@@ -285,21 +296,17 @@ subtitle_window:
 - **ESC key**: Hide/show window
 - **Close program**: Ctrl+C
 
-### View Logs
-
-Program runtime logs are saved in `realtime_translator_v2.log`, UTF-8 encoding.
-
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### 1. Audio Device Not Found
 
 **Problem**: Program shows "Device XXX not found"
 
 **Solution**:
-- Run `python -c "import sounddevice; print(sounddevice.query_devices())"` to view all devices
-- Modify device name in `config_v2.yaml` to match actual device name
+- Run `python scripts/list_devices.py` to view all devices
+- Update device name in `config.yaml` to match actual device name
 
-### 2. Stereo Mix Unavailable
+### 2. Stereo Mix Unavailable (Windows)
 
 **Problem**: Cannot enable Stereo Mix, or no sound from Stereo Mix
 
@@ -308,14 +315,14 @@ Program runtime logs are saved in `realtime_translator_v2.log`, UTF-8 encoding.
 - Switch to "Option B: VB-CABLE Solution"
 - Check if sound card driver is up to date
 
-### 3. No Sound from VB-CABLE
+### 3. No Sound from VB-CABLE / BlackHole
 
-**Problem**: No sound after selecting CABLE Output in Zoom
+**Problem**: No sound after selecting virtual audio device in meeting software
 
 **Solution**:
-- Check if VB-CABLE is correctly installed
+- Check if virtual audio device is correctly installed
 - Restart computer and test again
-- Test CABLE device in Windows sound settings
+- Test virtual audio device in system sound settings
 
 ### 4. Subtitle Window Not Showing
 
@@ -336,7 +343,16 @@ Program runtime logs are saved in `realtime_translator_v2.log`, UTF-8 encoding.
 - Reduce audio quality or adjust chunk_size
 - Check CPU usage
 
-### 6. Program Crashes
+### 6. Volcengine HTTP 401
+
+**Problem**: 401 error when connecting to Volcengine
+
+**Solution**:
+- `app_key` and `access_key` must be from the same application
+- Confirm "Simultaneous Interpretation 2.0" service is enabled
+- Check if keys have expired or been reset
+
+### 7. Program Crashes
 
 **Problem**: Program crashes immediately after startup
 
@@ -346,122 +362,105 @@ Program runtime logs are saved in `realtime_translator_v2.log`, UTF-8 encoding.
 - View log file for error details
 - Verify Volcengine keys are correct
 
-## 📊 Performance Metrics
+## Performance Metrics
 
-- **End-to-end latency**: 1.5-3 seconds (depends on network quality)
-- **Audio sample rate**: 16kHz (input) / 24kHz (output)
-- **Audio format**: PCM (input) / Ogg Opus (output)
-- **Memory usage**: ~200MB
-- **CPU usage**: 5-15% (depends on translation frequency)
+| Metric | Value |
+|--------|-------|
+| End-to-end latency | 1.5-3 seconds (depends on network quality) |
+| Audio sample rate | 16kHz (input) / 24kHz (output) |
+| Audio format | PCM (input) / Ogg Opus (output) |
+| Memory usage | ~200MB |
+| CPU usage | 5-15% (depends on translation frequency) |
 
-## 🗂️ Project Structure
+## Project Structure
 
 ```
-simultaneous_interpretation/
-├── realtime_translator/
-│   ├── main_v2.py                 # v2.0 main entry point
-│   ├── config_v2.yaml             # v2.0 configuration file
-│   ├── core/
-│   │   ├── audio_capture.py       # Audio capture module
-│   │   ├── audio_output.py        # Audio output module
-│   │   ├── system_audio_capture.py # System audio capture
-│   │   ├── volcengine_client.py   # Volcengine client
-│   │   └── conflict_resolver.py   # Conflict resolver (v1 legacy)
-│   ├── gui/
-│   │   └── subtitle_window.py     # Subtitle window module
-│   └── tests/
-│       └── test_improvements.py   # Unit tests
-├── ast_python_client/             # Volcengine SDK
-│   └── ast_python/
-│       └── python_protogen/       # Protobuf definitions
-├── README.md                      # Chinese documentation
-├── README_EN.md                   # This file (English)
-└── requirements.txt               # Dependencies list
+realtime_translator/
+├── main.py                      # Main entry point
+├── config.yaml                  # Configuration (copied from example, gitignored)
+├── config.yaml.example          # Config template (Windows/macOS device examples)
+├── requirements.txt             # Dependencies
+├── core/
+│   ├── audio_capture.py         # Microphone audio capture
+│   ├── audio_output.py          # Audio output (VB-CABLE)
+│   ├── system_audio_capture.py  # System audio capture
+│   ├── volcengine_client.py     # Volcengine client
+│   └── conflict_resolver.py     # Conflict resolver (v1 legacy)
+├── gui/
+│   └── subtitle_window.py       # Subtitle window module
+├── pb2/                         # Protobuf generated files
+├── scripts/
+│   ├── list_devices.py          # Audio device listing tool
+│   ├── vbcable_translator.py    # Single-channel translator (debug)
+│   ├── run.sh                   # macOS/Linux startup script
+│   └── healthcheck.sh           # Health check script
+└── README.md                    # Documentation
 ```
 
-## 🔄 Version History
+## Version History
 
-### v2.0 (Current) - Bidirectional Translation
+### v3.0 (Current) - Smart Subtitle Enhancement
 
-- ✅ Dual-channel independent concurrent execution
-- ✅ Headphone physical isolation, no echo
-- ✅ Simplified architecture, removed conflict detection
-- ✅ Smart subtitle window (dual-buffer deduplication)
-- ✅ Thread-safe UI updates
-- ✅ Comprehensive error handling and retry mechanism
-- ✅ Support for all mainstream meeting and IM software (Zoom, Teams, Tencent Meeting, Feishu, Discord, Telegram, etc.)
+- Channel 2 intelligent subtitle aggregation and deduplication, English/Chinese on separate lines
+- Chinese text beautification (auto-spacing after punctuation, smart line wrapping)
+- Channel 1 can be disabled, supporting subtitle-only mode
+- Subtitle display format optimization (line spacing, padding adjustments)
+- macOS support (BlackHole virtual audio)
+- Unified configuration template (Windows/macOS merged into one)
+
+### v2.0 - Bidirectional Translation
+
+- Dual-channel independent concurrent execution
+- Headphone physical isolation, no echo
+- Simplified architecture, removed conflict detection
+- Smart subtitle window (dual-buffer deduplication)
+- Thread-safe UI updates
+- Comprehensive error handling and retry mechanism
+- Support for all mainstream meeting and IM software
 
 ### v1.0 - Unidirectional Translation
 
-- ✅ Basic microphone to VB-CABLE translation
-- ✅ Volcengine S2S integration
-- ✅ Audio conflict detection mechanism
+- Basic microphone to VB-CABLE translation
+- Volcengine S2S integration
+- Audio conflict detection mechanism
 
-## 🚧 Roadmap (Planned Features)
+## Roadmap
 
-### v3.0 - Intelligent Voice Enhancement
+- **Voice Cloning** - Customize output voice characteristics
+- **Noise Reduction** - Background elimination and auto volume equalization
+- **Multi-language** - Support for more language pairs
+- **Terminology Database** - Industry-specific terminology customization
+- **GUI Control Panel** - Graphical configuration and monitoring
+- **Multi-participant Support** - Multi-channel audio separation and speaker identification
 
-- ⏳ **Voice Cloning** - Customize output voice characteristics
-  - Support for multiple preset voices (male/female/different ages)
-  - Adjustable voice parameters (pitch, speed, emotion)
-  - Personalized voice cloning (requires additional training)
-  - Real-time voice switching
+**Note**: Some features depend on Volcengine API support.
 
-- ⏳ **Voice Optimization**
-  - Intelligent noise reduction and background elimination
-  - Automatic volume equalization
-  - Adaptive speech rate adjustment
-  - Echo cancellation enhancement
-
-- ⏳ **Advanced Translation Features**
-  - Multi-language support expansion (more language pairs)
-  - Custom terminology database
-  - Context memory enhancement
-  - Semantic understanding optimization
-
-### v4.0 - Enterprise Features
-
-- ⏳ **Meeting Management**
-  - GUI control panel
-  - Translation history and export
-  - Real-time quality monitoring
-  - Statistical report generation
-
-- ⏳ **Multi-participant Meeting Support**
-  - Multi-channel audio separation
-  - Speaker identification
-  - Personalized translation settings
-  - Meeting recording and playback
-
-- ⏳ **Advanced Configuration**
-  - Translation quality optimization options
-  - Network optimization and caching
-  - Multi-device synchronization
-  - Cloud configuration management
-
-**Note**: Voice cloning functionality depends on Volcengine API support. Some features may require API upgrades or additional fees. We will continue to track Volcengine API updates and prioritize implementing the most user-requested features.
-
-## 🤝 Author
+## Author
 
 **Author**: Sue
 
 **Contact**:
+- GitHub: [Im-Sue](https://github.com/Im-Sue/)
 - X (Twitter): [@ssssy83717](https://x.com/ssssy83717)
 - Telegram: [@Sue_muyu](https://t.me/Sue_muyu)
 
-## 📄 License
+## Contributors
+
+- [XiaoHai67890](https://github.com/XiaoHai67890)
+
+## License
 
 **Copyright © 2024 Sue**
 
 This project uses a custom license:
 
 ### Personal Use
-✅ **Allowed** for personal learning, research, and non-commercial use
-⚠️ **Required** to retain copyright notice and author information
+- **Allowed** for personal learning, research, and non-commercial use
+- **Required** to retain copyright notice and author information
 
 ### Commercial Use
-❌ **Prohibited** without authorization
-✅ **Required** to contact author for commercial licensing
+- **Prohibited** without authorization
+- **Required** to contact author for commercial licensing
 
 For commercial licensing, please contact:
 - X: [@ssssy83717](https://x.com/ssssy83717)
@@ -471,22 +470,23 @@ For commercial licensing, please contact:
 
 This software is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose and noninfringement. In no event shall the authors or copyright holders be liable for any claim, damages or other liability.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - [Volcengine](https://www.volcengine.com/) - Simultaneous interpretation API service
-- [VB-CABLE](https://vb-audio.com/Cable/) - Virtual audio device
+- [VB-CABLE](https://vb-audio.com/Cable/) - Windows virtual audio device
+- [BlackHole](https://existential.audio/blackhole/) - macOS virtual audio device
 - [sounddevice](https://python-sounddevice.readthedocs.io/) - Python audio library
 
-## 📮 Feedback & Support
+## Feedback & Support
 
-If you encounter issues or have suggestions for improvement, please contact:
+If you encounter issues or have suggestions, please contact:
 
-- **Issues**: Submit GitHub Issue (if open source repo available)
+- **Issues**: [GitHub Issues](https://github.com/Im-Sue/simultaneous_interpretation/issues)
 - **X**: [@ssssy83717](https://x.com/ssssy83717)
 - **Telegram**: [@Sue_muyu](https://t.me/Sue_muyu)
 
 ---
 
-**⚡ Quick Start**: `pip install -r requirements.txt && python realtime_translator/main_v2.py`
+**Quick Start**: `pip install -r requirements.txt && cp config.yaml.example config.yaml && python main.py`
 
-**🎧 Important Note**: Please use headphones to avoid audio echo!
+**Important**: Please use headphones to avoid audio echo!

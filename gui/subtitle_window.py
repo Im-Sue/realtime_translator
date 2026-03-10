@@ -7,6 +7,8 @@ import tkinter as tk
 from tkinter import font, scrolledtext
 import threading
 import logging
+import re
+import textwrap
 from collections import deque
 from datetime import datetime
 
@@ -77,6 +79,10 @@ class SubtitleWindow:
         # 向后兼容：保留 subtitle_history 作为 display_buffer 的别名
         self.subtitle_history = self.display_buffer
 
+        # 展示层配置（避免排版拥挤）
+        # 仅显示最近若干条，历史仍完整保留在 buffer 中
+        self.display_limit = min(5, max(2, self.max_history))
+
         # 拖动相关
         self.drag_x = 0
         self.drag_y = 0
@@ -142,7 +148,12 @@ class SubtitleWindow:
             relief=tk.FLAT,  # 无边框
             highlightthickness=0,  # 无高亮边框
             state=tk.DISABLED,  # 禁止用户编辑
-            cursor="arrow"  # 鼠标样式
+            cursor="arrow",  # 鼠标样式
+            spacing1=4,
+            spacing2=3,
+            spacing3=10,
+            padx=10,
+            pady=10
         )
         self.text_widget.pack(expand=True, fill='both', padx=10, pady=10)
 
@@ -300,6 +311,97 @@ class SubtitleWindow:
         # 如果拉丁字母占比超过50%,认为是英文
         return (latin_chars / total_chars) > 0.5
 
+    def _normalize_text(self, text: str) -> str:
+        """规范化文本，减少排版混乱"""
+        if not text:
+            return ""
+
+        # 统一换行与空白
+        t = text.replace("\r\n", "\n").replace("\r", "\n")
+        t = re.sub(r"[ \t]+", " ", t)
+        t = re.sub(r"\n{2,}", "\n", t)
+        t = t.strip()
+        return t
+
+    def _beautify_chinese(self, text: str) -> str:
+        """中文排版清洗：去异常空格、收敛标点、提升可读性"""
+        if not text:
+            return ""
+
+        t = text.strip()
+        # 去掉中文之间被误插入的空格：如“我 们”->“我们”
+        t = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", t)
+        # 中文标点前后空格清理
+        t = re.sub(r"\s*([，。！？；：、])\s*", r"\1", t)
+        # 多个连续中文标点压缩
+        t = re.sub(r"([，。！？；：、])\1+", r"\1", t)
+        # 中英文夹杂时，英文与中文之间保留单空格更清晰
+        t = re.sub(r"(?<=[A-Za-z0-9])(?=[\u4e00-\u9fff])", " ", t)
+        t = re.sub(r"(?<=[\u4e00-\u9fff])(?=[A-Za-z0-9])", " ", t)
+        # 全局多空格收敛
+        t = re.sub(r"\s{2,}", " ", t)
+
+        # 句读优先换行：长句在逗号/句号后断行，阅读更稳
+        t = re.sub(r"([，。！？；])", r"\1\n", t)
+        t = re.sub(r"\n{2,}", "\n", t)
+        return t.strip()
+
+    def _smart_wrap(self, text: str, width: int = 32) -> str:
+        """中英文友好的轻量换行"""
+        if not text:
+            return ""
+
+        # 若已存在换行，逐行处理
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+        wrapped = []
+        for ln in lines:
+            if self._is_english_text(ln):
+                wrapped.extend(textwrap.wrap(ln, width=width, break_long_words=False, break_on_hyphens=False) or [ln])
+            else:
+                ln = self._beautify_chinese(ln)
+                wrapped.extend(textwrap.wrap(ln, width=width, break_long_words=True, break_on_hyphens=False) or [ln])
+        return "\n".join(wrapped)
+
+    def _format_display_text(self) -> str:
+        """构建最终展示文本（只显示最近N条，排版更紧凑）"""
+        if not self.subtitle_history:
+            return "等待字幕..."
+
+        recent_entries = list(self.subtitle_history)[-self.display_limit:]
+        cleaned = []
+
+        for entry in recent_entries:
+            t = self._normalize_text(entry)
+            if not t:
+                continue
+
+            # 针对 EN/ZH 双行格式做更清晰排版
+            lines = [ln.strip() for ln in t.split("\n") if ln.strip()]
+            en_line = next((ln for ln in lines if ln.startswith("EN")), "")
+            zh_line = next((ln for ln in lines if ln.startswith("ZH")), "")
+
+            if en_line or zh_line:
+                block = []
+                # 中文优先显示在上方，阅读更自然
+                if zh_line:
+                    zh_text = zh_line[2:].strip(":： ")
+                    zh_text = self._beautify_chinese(zh_text)
+                    block.append("【中文】\n" + self._smart_wrap(zh_text, width=26))
+                if en_line:
+                    en_text = en_line[2:].strip(":： ")
+                    block.append("【English】\n" + self._smart_wrap(en_text, width=38))
+                cleaned.append("\n".join(block))
+            else:
+                # 没有标签时按中文优先策略排版
+                nt = self._beautify_chinese(t)
+                cleaned.append(self._smart_wrap(nt, width=26 if not self._is_english_text(nt) else 38))
+
+        if not cleaned:
+            return "等待字幕..."
+
+        # 使用更轻分隔，避免视觉拥挤
+        return "\n··········\n".join(cleaned)
+
     def _check_merge_candidates(self, current_text: str, lookback_count: int = 10) -> int:
         """
         检查新文本是否为最近N条的合并结果
@@ -384,8 +486,8 @@ class SubtitleWindow:
         if not text or not text.strip():
             return
 
-        # 提取纯文本内容用于比较
-        current_text = text.strip()
+        # 提取纯文本内容用于比较（先规范化，减少乱排版）
+        current_text = self._normalize_text(text)
 
         # 构建新条目
         if self.show_timestamp:
@@ -439,7 +541,7 @@ class SubtitleWindow:
                     # 添加英文翻译
                     self.subtitle_history.append(new_entry)
                     # 更新显示后直接返回
-                    display_text = "\n\n".join(self.subtitle_history)
+                    display_text = self._format_display_text()
                     if self.window and self.text_widget:
                         self.window.after(0, lambda: self._update_text_widget(display_text))
                     return
@@ -496,8 +598,8 @@ class SubtitleWindow:
             self.subtitle_history.append(new_entry)
             logger.debug(f"🆕 首条字幕: '{current_text[:30]}...'")
 
-        # 构建显示内容(最近的N条记录)
-        display_text = "\n\n".join(self.subtitle_history)
+        # 构建显示内容（仅展示最近 display_limit 条，排版更友好）
+        display_text = self._format_display_text()
 
         # 线程安全更新
         if self.window and self.text_widget:

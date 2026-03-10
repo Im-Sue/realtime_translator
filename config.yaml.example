@@ -1,0 +1,94 @@
+# 实时同声传译器配置文件
+# 双向翻译（耳机模式）
+#
+# 使用方法: 复制本文件为 config.yaml，填入你的凭据和设备名称
+#   cp config.yaml.example config.yaml
+
+# =============================================================================
+# 火山引擎配置
+# 申请地址: https://console.volcengine.com/speech/service/10030
+# =============================================================================
+volcengine:
+  ws_url: "wss://openspeech.bytedance.com/api/v4/ast/v2/translate"
+  app_key: "YOUR_APP_KEY"
+  access_key: "YOUR_ACCESS_KEY"
+  resource_id: "volc.service_type.10053"
+
+# =============================================================================
+# 音频设备配置
+#
+# 【如何查看设备名称】
+#   python scripts/list_devices.py
+#
+# 【Windows 典型设备】
+#   microphone.device:        "麦克风"
+#   system_audio.device:      "立体声混音"
+#   system_audio.fallback:    "Microsoft 声音映射器 - Input"
+#   vbcable_output.device:    "CABLE Input"
+#
+# 【macOS 典型设备】(需安装 BlackHole: https://existential.audio/blackhole/)
+#   microphone.device:        "MacBook Air麦克风"
+#   system_audio.device:      "BlackHole 16ch"
+#   system_audio.fallback:    "BlackHole 16ch"
+#   vbcable_output.device:    "MacBook Air扬声器"
+# =============================================================================
+audio:
+  microphone:
+    device: "麦克风"              # 你的麦克风设备名
+    sample_rate: 16000
+    channels: 1
+    chunk_size: 1600              # 100ms @ 16kHz
+
+  system_audio:
+    device: "立体声混音"           # Windows: 立体声混音 / macOS: BlackHole 16ch
+    fallback_device: "Microsoft 声音映射器 - Input"
+    sample_rate: 16000
+    channels: 1
+    chunk_size: 1600
+
+  vbcable_output:
+    device: "CABLE Input"         # Windows: CABLE Input / macOS: 扬声器名
+    sample_rate: 24000
+    use_ffmpeg: true              # Ogg Opus 解码，macOS 可设为 false
+    monitor_device: null
+    enable_monitor: false
+
+# =============================================================================
+# 翻译通道配置
+# =============================================================================
+channels:
+  # Channel 1: 你说中文 → 对方听英文
+  zh_to_en:
+    mode: "s2s"
+    source_language: "zh"
+    target_language: "en"
+    enabled: true                 # 设为 false 可关闭（纯字幕模式）
+
+  # Channel 2: 对方说英文 → 你看中文字幕
+  en_to_zh:
+    mode: "s2t"
+    source_language: "en"
+    target_language: "zh"
+    enabled: true
+
+# =============================================================================
+# 字幕窗口配置
+# =============================================================================
+subtitle_window:
+  enabled: true
+  width: 600
+  height: 800
+  font_size: 14                   # 双击窗口可切换大小
+  bg_color: "#000000"
+  text_color: "#FFFFFF"
+  opacity: 0.85
+  position: "top_right"           # 可选: top_center, bottom_center, top_left, top_right
+  max_history: 1000
+  show_timestamp: false
+
+# =============================================================================
+# 运行方式
+# =============================================================================
+#   python main.py                       # 使用默认 config.yaml
+#   python main.py my_config.yaml        # 使用指定配置文件
+# =============================================================================
