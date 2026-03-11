@@ -1,0 +1,63 @@
+name: Build macOS App
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/startup-degradation-and-windows-tooling
+    paths:
+      - ".github/workflows/build-macos-app.yml"
+      - "main.py"
+      - "core/**"
+      - "gui/**"
+      - "pb2/**"
+      - "scripts/build_mac.sh"
+      - "requirements.txt"
+      - "realtime_translator_mac.spec"
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build macOS app
+        run: |
+          chmod +x scripts/build_mac.sh
+          . .venv/bin/activate
+          bash scripts/build_mac.sh
+
+      - name: Inspect dist
+        run: |
+          ls -R dist
+
+      - name: Zip app bundle
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/realtime_translator.app dist/realtime_translator.app.zip
+          ditto -c -k --keepParent dist/realtime_translator_support dist/realtime_translator_support.zip
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: realtime_translator-macos-app
+          path: dist/realtime_translator.app.zip
+
+      - name: Upload support artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: realtime_translator-macos-support
+          path: dist/realtime_translator_support.zip
