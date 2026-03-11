@@ -81,6 +81,28 @@ class SystemAudioCapturer:
             logger.debug(f"   设备 [{device_id}] 测试失败: {e}")
             return False
 
+    @staticmethod
+    def _is_microphone_device(device_name: str) -> bool:
+        """过滤明显的麦克风设备，避免错误回退到人声输入"""
+        lowered_name = device_name.lower()
+        mic_keywords = ("mic", "microphone", "麦克风")
+        return any(keyword in lowered_name for keyword in mic_keywords)
+
+    @staticmethod
+    def _system_audio_score(device_name: str) -> int:
+        """为常见系统回采设备打分，分数越高越可能是正确输入源"""
+        lowered_name = device_name.lower()
+        score_keywords = (
+            "stereo mix",
+            "立体声混音",
+            "what u hear",
+            "wave out mix",
+            "blackhole",
+            "loopback",
+            "monitor",
+        )
+        return sum(1 for keyword in score_keywords if keyword in lowered_name)
+
     def _find_device(self) -> int:
         """
         查找系统音频设备
@@ -114,32 +136,8 @@ class SystemAudioCapturer:
                     logger.warning(f"⚠️  设备验证失败,尝试降级设备...")
                     break
 
-        # 2. 尝试降级设备(排除VB-CABLE Output以避免回声)
+        # 2. 优先尝试显式配置的降级设备
         logger.warning(f"⚠️  主设备 '{self.device_name}' 不可用，尝试降级设备...")
-        logger.warning(f"⚠️  警告: 使用CABLE Output会导致音频回路!")
-
-        # 搜索所有可用的输入设备(排除CABLE Output)
-        available_devices = []
-        for i, device in enumerate(devices):
-            device_name = device['name']
-            max_input_channels = device['max_input_channels']
-
-            # 排除VB-CABLE相关设备
-            if max_input_channels > 0 and "CABLE" not in device_name.upper():
-                if self._test_device(i):
-                    available_devices.append((i, device_name))
-                    logger.info(f"✅ 找到可用设备: [{i}] {device_name}")
-
-        # 如果找到可用设备,使用第一个
-        if available_devices:
-            device_id, device_name = available_devices[0]
-            logger.info(f"✅ 使用设备: [{device_id}] {device_name}")
-            return device_id
-
-        # 如果没有找到任何设备,最后才尝试CABLE Output(并警告)
-        logger.error("❌ 未找到非VB-CABLE的音频设备!")
-        logger.error("⚠️  将尝试使用CABLE Output,但这会导致音频回路!")
-
         for i, device in enumerate(devices):
             device_name = device['name']
             max_input_channels = device['max_input_channels']
@@ -148,10 +146,38 @@ class SystemAudioCapturer:
                 logger.warning(f"🔄 测试降级设备: [{i}] {device_name}")
 
                 if self._test_device(i):
-                    logger.warning(f"⚠️  使用降级设备(有回声风险): [{i}] {device_name}")
+                    logger.warning(f"⚠️  使用显式降级设备(有回声风险): [{i}] {device_name}")
                     return i
 
-        # 3. 抛出异常
+        # 3. 仅尝试常见的系统回采设备，避免误选普通麦克风
+        logger.warning("⚠️  未找到可用的显式降级设备，尝试推断系统回采设备...")
+        candidates = []
+        for i, device in enumerate(devices):
+            device_name = device['name']
+            max_input_channels = device['max_input_channels']
+
+            if max_input_channels <= 0:
+                continue
+            if "CABLE" in device_name.upper():
+                continue
+            if self._is_microphone_device(device_name):
+                logger.debug(f"⏭️  跳过麦克风设备: [{i}] {device_name}")
+                continue
+
+            score = self._system_audio_score(device_name)
+            if score <= 0:
+                continue
+            if self._test_device(i):
+                candidates.append((score, i, device_name))
+                logger.info(f"✅ 找到候选系统回采设备: [{i}] {device_name} (score={score})")
+
+        if candidates:
+            candidates.sort(reverse=True)
+            _, device_id, device_name = candidates[0]
+            logger.warning(f"⚠️  使用推断的系统回采设备: [{device_id}] {device_name}")
+            return device_id
+
+        # 4. 抛出异常，不再静默回退到普通输入设备
         logger.error("❌ 未找到任何可用的系统音频设备!")
         logger.error(f"   请确保已启用: '{self.device_name}' 或 '{self.fallback_device}'")
         logger.error("")
@@ -241,8 +267,8 @@ class SystemAudioCapturer:
         """
         return {
             'device_index': self.device_index,
-            'device_name': self.device_name if self.device_index is not None
-                          else sd.query_devices(self.device_index)['name'],
+            'device_name': sd.query_devices(self.device_index)['name']
+                          if self.device_index is not None else self.device_name,
             'sample_rate': self.sample_rate,
             'channels': self.channels,
             'chunk_size': self.chunk_size,

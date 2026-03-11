@@ -101,6 +101,87 @@ class DualChannelTranslator:
         # 初始化组件
         self._init_components()
 
+    def _channel1_ready(self) -> bool:
+        """Channel 1 运行前置条件是否满足"""
+        return bool(
+            self.channel1_enabled and
+            self.mic_capturer and
+            self.audio_player and
+            self.translator_zh_to_en
+        )
+
+    def _channel2_ready(self) -> bool:
+        """Channel 2 运行前置条件是否满足"""
+        return bool(
+            self.channel2_enabled and
+            self.system_audio_capturer and
+            self.translator_en_to_zh and
+            self.subtitle_window_thread
+        )
+
+    async def _disable_channel1(self, reason: str):
+        """关闭 Channel 1 并清理资源"""
+        if not self.channel1_enabled and not self.mic_capturer and not self.audio_player and not self.translator_zh_to_en:
+            return
+
+        logger.warning(f"⚠️  Channel 1 已降级关闭: {reason}")
+        self.channel1_enabled = False
+
+        if self.mic_capturer:
+            try:
+                self.mic_capturer.stop()
+            except Exception as e:
+                logger.warning(f"⚠️  停止 Channel 1 麦克风失败: {e}")
+            self.mic_capturer = None
+
+        if self.audio_player:
+            try:
+                self.audio_player.stop()
+            except Exception as e:
+                logger.warning(f"⚠️  停止 Channel 1 音频播放器失败: {e}")
+            self.audio_player = None
+
+        if self.translator_zh_to_en:
+            try:
+                await self.translator_zh_to_en.close()
+            except Exception as e:
+                logger.warning(f"⚠️  关闭 Channel 1 翻译器失败: {e}")
+            self.translator_zh_to_en = None
+
+    async def _disable_channel2(self, reason: str):
+        """关闭 Channel 2 并清理资源"""
+        if not self.channel2_enabled and not self.system_audio_capturer and not self.translator_en_to_zh and not self.subtitle_window_thread:
+            return
+
+        logger.warning(f"⚠️  Channel 2 已降级关闭: {reason}")
+        self.channel2_enabled = False
+
+        if self.system_audio_capturer:
+            try:
+                self.system_audio_capturer.stop()
+            except Exception as e:
+                logger.warning(f"⚠️  停止 Channel 2 系统音频捕获失败: {e}")
+            self.system_audio_capturer = None
+
+        self.ch2_en_buffer = ""
+        self.ch2_zh_buffer = ""
+        self.ch2_last_update_time = 0.0
+
+        if self.translator_en_to_zh:
+            try:
+                await self.translator_en_to_zh.close()
+            except Exception as e:
+                logger.warning(f"⚠️  关闭 Channel 2 翻译器失败: {e}")
+            self.translator_en_to_zh = None
+
+        if self.subtitle_window_thread:
+            try:
+                self.subtitle_window_thread.stop()
+            except Exception as e:
+                logger.warning(f"⚠️  停止字幕窗口失败: {e}")
+            self.subtitle_window_thread = None
+            self.subtitle_window = None
+
     def _is_mostly_english(self, text: str) -> bool:
         if not text:
             return False
@@ -196,6 +277,9 @@ class DualChannelTranslator:
 
     def _flush_ch2_buffer(self, force: bool = False):
         """输出 Channel 2 聚合文本（EN/ZH 分区）"""
+        if not self.subtitle_window_thread:
+            return
+
         en = self.ch2_en_buffer.strip()
         zh = self.ch2_zh_buffer.strip()
 
@@ -244,14 +328,18 @@ class DualChannelTranslator:
         logger.info("\n📍 初始化 Channel 2 输入...")
         system_audio_config = audio_config['system_audio']
 
-        self.system_audio_capturer = SystemAudioCapturer(
-            device_name=system_audio_config['device'],
-            fallback_device=system_audio_config['fallback_device'],
-            sample_rate=16000,
-            channels=1,
-            chunk_size=1600
-        )
-        logger.info("✅ 系统音频捕获器已初始化")
+        self.system_audio_capturer = None
+        if self.channel2_enabled:
+            self.system_audio_capturer = SystemAudioCapturer(
+                device_name=system_audio_config['device'],
+                fallback_device=system_audio_config['fallback_device'],
+                sample_rate=16000,
+                channels=1,
+                chunk_size=1600
+            )
+            logger.info("✅ 系统音频捕获器已初始化")
+        else:
+            logger.warning("⚠️  Channel 2 已禁用：跳过系统音频初始化")
 
         # 3. 音频播放器 (Channel 1 输出 → VB-CABLE)
         logger.info("\n📍 初始化 Channel 1 输出...")
@@ -300,21 +388,26 @@ class DualChannelTranslator:
         logger.info("\n📍 初始化 Channel 2 输出...")
         subtitle_config = self.config.get('subtitle_window', {})
 
-        self.subtitle_window = SubtitleWindow(
-            width=subtitle_config.get('width', 400),
-            height=subtitle_config.get('height', 800),
-            font_size=subtitle_config.get('font_size', 20),
-            bg_color=subtitle_config.get('bg_color', '#000000'),
-            text_color=subtitle_config.get('text_color', '#FFFFFF'),
-            opacity=subtitle_config.get('opacity', 0.85),
-            position=subtitle_config.get('position', 'top_right'),
-            max_history=subtitle_config.get('max_history', 1000),
-            show_timestamp=subtitle_config.get('show_timestamp', False)
-        )
+        self.subtitle_window = None
+        self.subtitle_window_thread = None
+        if self.channel2_enabled:
+            self.subtitle_window = SubtitleWindow(
+                width=subtitle_config.get('width', 400),
+                height=subtitle_config.get('height', 800),
+                font_size=subtitle_config.get('font_size', 20),
+                bg_color=subtitle_config.get('bg_color', '#000000'),
+                text_color=subtitle_config.get('text_color', '#FFFFFF'),
+                opacity=subtitle_config.get('opacity', 0.85),
+                position=subtitle_config.get('position', 'top_right'),
+                max_history=subtitle_config.get('max_history', 1000),
+                show_timestamp=subtitle_config.get('show_timestamp', False)
+            )
 
-        # 使用线程包装器
-        self.subtitle_window_thread = SubtitleWindowThread(self.subtitle_window)
-        logger.info("✅ 字幕窗口已初始化")
+            # 使用线程包装器
+            self.subtitle_window_thread = SubtitleWindowThread(self.subtitle_window)
+            logger.info("✅ 字幕窗口已初始化")
+        else:
+            logger.warning("⚠️  Channel 2 已禁用：跳过字幕窗口初始化")
 
         # 5. 火山引擎翻译客户端 (两个独立连接)
         logger.info("\n📍 初始化火山引擎翻译客户端...")
@@ -368,49 +461,75 @@ class DualChannelTranslator:
         # 1. 启动音频捕获
         logger.info("\n🚀 启动音频捕获...")
         if self.mic_capturer:
-            self.mic_capturer.start()
-        self.system_audio_capturer.start()
+            try:
+                self.mic_capturer.start()
+            except Exception as e:
+                await self._disable_channel1(f"麦克风启动失败: {e}")
+
+        if self.system_audio_capturer:
+            try:
+                self.system_audio_capturer.start()
+            except Exception as e:
+                await self._disable_channel2(f"系统音频捕获启动失败: {e}")
 
         # 2. 启动音频播放器
         if self.audio_player:
             logger.info("🚀 启动音频播放器...")
-            self.audio_player.start()
+            try:
+                self.audio_player.start()
+            except Exception as e:
+                await self._disable_channel1(f"音频播放器启动失败: {e}")
         else:
             logger.info("🚀 Channel 1 音频输出已关闭（仅字幕模式）")
 
         # 3. 启动字幕窗口 (非阻塞)
-        logger.info("🚀 启动字幕窗口...")
-        self.subtitle_window_thread.start()
+        if self.subtitle_window_thread:
+            logger.info("🚀 启动字幕窗口...")
+            try:
+                self.subtitle_window_thread.start()
+            except Exception as e:
+                await self._disable_channel2(f"字幕窗口启动失败: {e}")
 
         # 4. 连接火山引擎
         logger.info("🚀 连接火山引擎...")
 
         if self.translator_zh_to_en:
-            await self.translator_zh_to_en.connect()
-            await self.translator_zh_to_en.start_session()
-            logger.info("✅ Channel 1 已连接")
+            try:
+                await self.translator_zh_to_en.connect()
+                await self.translator_zh_to_en.start_session()
+                logger.info("✅ Channel 1 已连接")
+            except Exception as e:
+                await self._disable_channel1(f"火山引擎 Channel 1 连接失败: {e}")
 
         if self.translator_en_to_zh:
-            await self.translator_en_to_zh.connect()
-            await self.translator_en_to_zh.start_session()
-            logger.info("✅ Channel 2 已连接")
+            try:
+                await self.translator_en_to_zh.connect()
+                await self.translator_en_to_zh.start_session()
+                logger.info("✅ Channel 2 已连接")
+            except Exception as e:
+                await self._disable_channel2(f"火山引擎 Channel 2 连接失败: {e}")
+
+        if not self._channel1_ready() and not self._channel2_ready():
+            raise RuntimeError("所有通道均不可用，请检查音频设备、FFmpeg 和火山引擎配置")
 
         # 5. 打印启动信息
         logger.info("\n" + "=" * 80)
         logger.info("✅ 双向翻译器已启动")
         logger.info("=" * 80)
-        if self.translator_zh_to_en:
+        if self._channel1_ready():
             logger.info("📤 Channel 1: 请开始说中文...")
             logger.info("   🔊 翻译后的英文将输出到 VB-CABLE Input")
             logger.info("   📱 请在 Zoom 中选择: CABLE Output (VB-Audio Virtual Cable)")
         else:
             logger.info("📤 Channel 1: 已关闭（仅字幕模式）")
         logger.info("")
-        if self.translator_en_to_zh:
+        if self._channel2_ready():
             logger.info("📥 Channel 2: 对方的英文语音将翻译为中文字幕")
             logger.info("   📺 请查看屏幕右上角的字幕窗口")
             logger.info("   🎧 请务必使用耳机，避免音频回声!")
             logger.info("")
+        else:
+            logger.info("📥 Channel 2: 已关闭")
         logger.info("   ⌨️  按 Ctrl+C 停止并查看统计")
         logger.info("=" * 80 + "\n")
 
@@ -549,6 +668,8 @@ class DualChannelTranslator:
             """UI 事件处理循环 (处理字幕窗口事件)"""
             while self.is_running:
                 try:
+                    if not self.subtitle_window_thread:
+                        return
                     self.subtitle_window_thread.process_events()
                     await asyncio.sleep(0.05)  # 20fps 足够流畅
                 except Exception as e:
@@ -558,10 +679,10 @@ class DualChannelTranslator:
         try:
             tasks = [ui_event_loop()]
 
-            if self.translator_zh_to_en:
+            if self._channel1_ready():
                 tasks.append(channel1_loop())
 
-            if self.translator_en_to_zh:
+            if self._channel2_ready():
                 tasks.append(channel2_loop())
 
             await asyncio.gather(*tasks)
@@ -578,7 +699,8 @@ class DualChannelTranslator:
         # 停止音频捕获
         if self.mic_capturer:
             self.mic_capturer.stop()
-        self.system_audio_capturer.stop()
+        if self.system_audio_capturer:
+            self.system_audio_capturer.stop()
 
         # 停止前尽量输出剩余字幕片段
         self._flush_ch2_buffer(force=True)
@@ -595,7 +717,8 @@ class DualChannelTranslator:
             self.audio_player.stop()
 
         # 关闭字幕窗口
-        self.subtitle_window_thread.stop()
+        if self.subtitle_window_thread:
+            self.subtitle_window_thread.stop()
 
         # 打印统计
         self._print_stats()
