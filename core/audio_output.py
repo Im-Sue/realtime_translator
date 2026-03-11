@@ -9,6 +9,7 @@ import logging
 from typing import Optional
 import queue
 import threading
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +426,13 @@ class OggOpusPlayer(AudioPlayer):
         import subprocess
 
         try:
+            ffmpeg_bin = shutil.which("ffmpeg")
+            if not ffmpeg_bin:
+                raise RuntimeError(
+                    "未找到 ffmpeg 可执行文件。请安装 FFmpeg 并加入 PATH，"
+                    "或在 config.yaml 中关闭需要语音输出的 zh_to_en 通道。"
+                )
+
             logger.info("🎬 启动持久FFmpeg进程...")
             # VB-CABLE需要48kHz采样率,强制重采样
             output_sample_rate = 48000
@@ -432,7 +440,7 @@ class OggOpusPlayer(AudioPlayer):
 
             self._ffmpeg_process = subprocess.Popen(
                 [
-                    'ffmpeg',
+                    ffmpeg_bin,
                     '-loglevel', 'error',
                     '-f', 'ogg',              # 输入格式: Ogg容器
                     '-i', 'pipe:0',           # 从stdin读取流式数据
