@@ -26,12 +26,25 @@ from core.system_audio_capture import SystemAudioCapturer
 from core.volcengine_client import VolcengineTranslator, VolcengineConfig
 from gui.subtitle_window import SubtitleWindow, SubtitleWindowThread
 
+
+def get_runtime_dir() -> Path:
+    """获取运行目录：源码模式为项目目录，打包模式为可执行文件目录"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+RUNTIME_DIR = get_runtime_dir()
+DEFAULT_CONFIG_PATH = RUNTIME_DIR / "config.yaml"
+DEFAULT_CONFIG_EXAMPLE_PATH = RUNTIME_DIR / "config.yaml.example"
+LOG_PATH = RUNTIME_DIR / "realtime_translator_v2.log"
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler('realtime_translator_v2.log', encoding='utf-8'),
+        logging.FileHandler(LOG_PATH, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -70,7 +83,7 @@ class DualChannelTranslator:
             logger.info(f"✅ 配置文件加载成功: {config_path}")
         except FileNotFoundError:
             logger.error(f"❌ 配置文件未找到: {config_path}")
-            logger.error("   请从 config.yaml.example 复制一份并命名为 config.yaml")
+            logger.error(f"   请从 {DEFAULT_CONFIG_EXAMPLE_PATH.name} 复制一份并命名为 {DEFAULT_CONFIG_PATH.name}")
             raise
 
         self.is_running = False
@@ -757,14 +770,10 @@ class DualChannelTranslator:
         logger.info("=" * 80)
 
 
-async def main():
-    """主函数"""
+async def run_worker(config_file: str):
+    """工作进程入口：真正运行翻译逻辑"""
 
-    # 检查命令行参数
-    config_file = "config.yaml"
-    if len(sys.argv) > 1:
-        config_file = sys.argv[1]
-        logger.info(f"📝 使用配置文件: {config_file}")
+    logger.info(f"📝 使用配置文件: {config_file}")
 
     translator = DualChannelTranslator(config_path=config_file)
 
@@ -789,9 +798,41 @@ async def main():
         await translator.stop()
 
 
+def parse_cli_args():
+    """解析命令行参数"""
+    args = sys.argv[1:]
+    worker_mode = False
+
+    if args and args[0] == "--worker":
+        worker_mode = True
+        args = args[1:]
+
+    config_file = str(DEFAULT_CONFIG_PATH)
+    if args:
+        config_file = args[0]
+
+    return worker_mode, config_file
+
+
+def run_gui(config_file: str):
+    """桌面控制面板入口"""
+    from gui.control_window import launch_control_window
+
+    launch_control_window(
+        config_path=config_file,
+        runtime_dir=RUNTIME_DIR,
+        log_path=LOG_PATH,
+    )
+
+
 if __name__ == "__main__":
+    worker_mode, config_file = parse_cli_args()
+
     try:
-        asyncio.run(main())
+        if worker_mode:
+            asyncio.run(run_worker(config_file))
+        else:
+            run_gui(config_file)
     except KeyboardInterrupt:
         logger.info("\n⌨️  程序已终止")
     except Exception as e:
