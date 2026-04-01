@@ -1,0 +1,18 @@
+{
+  "identifier": "default",
+  "description": "默认权限配置",
+  "windows": ["main", "subtitle-overlay"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-hide",
+    "core:window:allow-inner-size",
+    "core:window:allow-scale-factor",
+    "core:window:allow-set-size",
+    "core:window:allow-start-dragging",
+    "core:webview:default",
+    "shell:allow-open",
+    "shell:allow-execute",
+    "core:event:default"
+  ]
+}

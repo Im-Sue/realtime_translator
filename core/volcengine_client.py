@@ -6,20 +6,55 @@
 import asyncio
 import uuid
 import logging
+import sys
+import types
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Callable
 import websockets
 from websockets import Headers
-import sys
-from pathlib import Path
 
-# 确保项目根目录在 Python 路径中（支持不同的运行方式）
-_current_dir = Path(__file__).parent
-_project_root = _current_dir.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
+
+
+# NOTE: 不再手动操纵 sys.path。
+# 生产环境由 Tauri 通过 _pth / PYTHONPATH 设置搜索路径；
+# 开发环境依赖 CWD 或 IDE 配置的 PYTHONPATH。
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_protobuf_runtime_compat():
+    """兼容旧版 protobuf 运行时，避免缺少 runtime_version 模块导致导入失败。"""
+    try:
+        from google.protobuf import runtime_version as _runtime_version  # noqa: F401
+        return
+    except ImportError:
+        compat_module = types.ModuleType("google.protobuf.runtime_version")
+
+        class Domain:
+            PUBLIC = "PUBLIC"
+            INTERNAL = "INTERNAL"
+
+        def validate_protobuf_runtime_version(*args, **kwargs):
+            return None
+
+        compat_module.Domain = Domain
+        compat_module.ValidateProtobufRuntimeVersion = validate_protobuf_runtime_version
+        sys.modules["google.protobuf.runtime_version"] = compat_module
+
+
+def _ensure_repo_package_alias():
+    """开发态从仓库根目录启动时，为 generated pb2 提供包名别名。"""
+    if "realtime_translator" in sys.modules:
+        return
+
+    package_module = types.ModuleType("realtime_translator")
+    package_module.__path__ = [str(Path(__file__).resolve().parents[1])]
+    sys.modules["realtime_translator"] = package_module
+
+
+_ensure_protobuf_runtime_compat()
+_ensure_repo_package_alias()
 
 # 错误分类: 可重试的临时性错误
 RETRYABLE_ERRORS = {
@@ -40,11 +75,33 @@ FATAL_ERRORS = {
     "invalid_access_key",  # 访问密钥无效
 }
 
-# 导入火山引擎protobuf定义（内部集成版本）
-from realtime_translator.pb2.products.understanding.ast.ast_service_pb2 import (
-    TranslateRequest, TranslateResponse
-)
-from realtime_translator.pb2.common.events_pb2 import Type
+# 导入火山引擎 protobuf 定义。
+# 优先走打包后的包路径；开发态从仓库根目录直接运行时退回本地 pb2 目录。
+try:
+    from realtime_translator.pb2.products.understanding.ast.ast_service_pb2 import (
+        TranslateRequest, TranslateResponse
+    )
+    from realtime_translator.pb2.common.events_pb2 import Type
+except ModuleNotFoundError:
+    from pb2.products.understanding.ast.ast_service_pb2 import (
+        TranslateRequest, TranslateResponse
+    )
+    from pb2.common.events_pb2 import Type
+
+# 字幕相关事件名称映射，便于日志中直接识别生命周期阶段
+EVENT_NAME_MAP = {
+    Type.SessionStarted: "SessionStarted",
+    Type.SourceSubtitleStart: "SourceSubtitleStart",
+    Type.SourceSubtitleResponse: "SourceSubtitleResponse",
+    Type.SourceSubtitleEnd: "SourceSubtitleEnd",
+    Type.TranslationSubtitleStart: "TranslationSubtitleStart",
+    Type.TranslationSubtitleResponse: "TranslationSubtitleResponse",
+    Type.TranslationSubtitleEnd: "TranslationSubtitleEnd",
+    Type.SessionFinished: "SessionFinished",
+    Type.SessionFailed: "SessionFailed",
+    Type.SessionCanceled: "SessionCanceled",
+    Type.UsageResponse: "UsageResponse",
+}
 
 logger.info("✅ 成功导入火山引擎protobuf定义（内部版本）")
 
@@ -143,22 +200,31 @@ class VolcengineTranslator:
 
             self.conn = await websockets.connect(
                 self.config.ws_url,
-                extra_headers=headers,  # websockets 12.0+ 使用 extra_headers
+                additional_headers=headers,  # websockets 14+ (旧版用 extra_headers)
                 max_size=1000000000,
                 ping_interval=None
             )
 
             self.is_connected = True
-            # websockets 12.0+ 中使用 response_headers 属性
-            log_id = self.conn.response_headers.get('X-Tt-Logid', 'unknown')
+            # websockets 14+ 使用 conn.response.headers;13.x 使用 conn.response_headers
+            try:
+                resp_headers = self.conn.response.headers  # websockets 14+
+            except AttributeError:
+                resp_headers = getattr(self.conn, 'response_headers', {})
+            log_id = resp_headers.get('X-Tt-Logid', 'unknown') if resp_headers else 'unknown'
             logger.info(f"✅ WebSocket已连接 (LogID: {log_id})")
 
         except Exception as e:
             logger.error(f"❌ WebSocket连接失败: {e}")
             # 尝试从异常中提取LogID (如果连接失败)
             try:
-                if hasattr(e, 'response_headers'):
-                    log_id = e.response_headers.get('X-Tt-Logid', 'unknown')
+                resp_headers = None
+                if hasattr(e, 'response') and hasattr(e.response, 'headers'):
+                    resp_headers = e.response.headers  # websockets 14+
+                elif hasattr(e, 'response_headers'):
+                    resp_headers = e.response_headers  # websockets 13.x
+                if resp_headers:
+                    log_id = resp_headers.get('X-Tt-Logid', 'unknown')
                     logger.error(f"   LogID: {log_id}")
             except:
                 pass
@@ -279,14 +345,7 @@ class VolcengineTranslator:
             response.ParseFromString(response_data)
 
             # 调试日志: 记录所有响应事件
-            event_name = {
-                Type.SessionStarted: "SessionStarted",
-                Type.TranslationSubtitleResponse: "TranslationSubtitleResponse",  # 修复: 正确的枚举名
-                Type.SessionFinished: "SessionFinished",
-                Type.SessionFailed: "SessionFailed",
-                Type.SessionCanceled: "SessionCanceled",
-                Type.UsageResponse: "UsageResponse"
-            }.get(response.event, f"Unknown({response.event})")
+            event_name = EVENT_NAME_MAP.get(response.event, f"Unknown({response.event})")
 
             # 🔍 详细响应日志
             audio_size = len(response.data) if response.data else 0

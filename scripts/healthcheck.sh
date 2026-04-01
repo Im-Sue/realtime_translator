@@ -22,8 +22,8 @@ python -m pip check >/dev/null && ok "依赖检查通过 (pip check)" || {
   exit 1
 }
 
-if [[ ! -f config_v2.yaml ]]; then
-  err "缺少 config_v2.yaml"
+if [[ ! -f config.yaml ]]; then
+  err "缺少 config.yaml"
   exit 1
 fi
 
@@ -32,7 +32,7 @@ cfg_output=$(python - <<'PY'
 import yaml, sys
 from pathlib import Path
 
-p = Path('config_v2.yaml')
+p = Path('config.yaml')
 try:
     c = yaml.safe_load(p.read_text(encoding='utf-8')) or {}
 except Exception as e:
@@ -67,7 +67,7 @@ status=$?
 set -e
 
 if [[ $status -eq 2 ]]; then
-  err "config_v2.yaml 解析失败（YAML 格式错误）"
+  err "config.yaml 解析失败（YAML 格式错误）"
   exit 1
 elif [[ $status -eq 3 ]]; then
   err "配置未就绪: ${cfg_output#CONFIG_BAD::}"

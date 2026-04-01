@@ -15,5 +15,5 @@ echo "🔍 先执行健康检查..."
 bash scripts/healthcheck.sh
 
 echo
-echo "🚀 启动同声传译 main_v2.py ..."
-exec python main_v2.py
+echo "🚀 启动同声传译 main.py ..."
+exec python main.py

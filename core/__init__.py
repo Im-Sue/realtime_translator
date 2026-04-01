@@ -1,11 +1,11 @@
 """
 核心模块
-"""
 
-from .audio_capture import AudioCapturer
-from .audio_output import AudioPlayer, OggOpusPlayer
-from .volcengine_client import VolcengineTranslator, VolcengineConfig, TranslationResult
-from .conflict_resolver import OpponentPriorityResolver, ConflictStatistics
+NOTE: 不在此处贪婪导入子模块。
+各子模块（audio_capture, audio_output 等）依赖 sounddevice/numpy 等 C 扩展，
+顶层导入会导致 `import core` 时触发全部加载链。
+请直接从子模块导入：from core.audio_capture import AudioCapturer
+"""
 
 __all__ = [
     'AudioCapturer',

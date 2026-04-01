@@ -1,0 +1,63 @@
+{
+    "productName":  "RealtimeTranslator",
+    "version":  "1.0.0",
+    "identifier":  "com.realtime-translator.app",
+    "build":  {
+                  "frontendDist":  "../dist",
+                  "devUrl":  "http://localhost:1420",
+                  "beforeDevCommand":  "pnpm dev",
+                  "beforeBuildCommand":  "pnpm build"
+              },
+    "app":  {
+                "windows":  [
+                                {
+                                    "title":  "实时同传",
+                                    "label":  "main",
+                                    "width":  1100,
+                                    "height":  720,
+                                    "resizable":  true,
+                                    "center":  true,
+                                    "minWidth":  960,
+                                    "minHeight":  600
+                                },
+                                {
+                                    "title":  "",
+                                    "label":  "subtitle-overlay",
+                                    "url":  "/subtitle",
+                                    "decorations":  false,
+                                    "transparent":  false,
+                                    "shadow":  false,
+                                    "alwaysOnTop":  true,
+                                    "skipTaskbar":  true,
+                                    "width":  1000,
+                                    "height":  300,
+                                    "resizable":  true,
+                                    "visible":  false,
+                                    "x":  460,
+                                    "y":  920
+                                }
+                            ],
+                "security":  {
+                                 "csp":  null
+                             }
+            },
+    "bundle":  {
+                   "active":  true,
+                   "targets":  "all",
+                   "icon":  [
+                                "icons/32x32.png",
+                                "icons/128x128.png",
+                                "icons/128x128@2x.png",
+                                "icons/icon.icns",
+                                "icons/icon.ico"
+                            ],
+                   "resources":  {
+                                     "F:/python/simultaneous_interpretation/realtime_translator/bundle/windows-x64/deps/":  "deps",
+                                     "F:/python/simultaneous_interpretation/realtime_translator/bundle/windows-x64/python/":  "python",
+                                     "F:/python/simultaneous_interpretation/realtime_translator/bundle/windows-x64/backend/":  "backend"
+                                 }
+               },
+    "plugins":  {
+
+                }
+}

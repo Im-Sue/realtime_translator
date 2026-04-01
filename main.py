@@ -14,29 +14,38 @@ Channel 2: Zoom(英文) → 系统音频 → 火山引擎(s2t) → 字幕窗口(
 import asyncio
 import yaml
 import logging
-import sounddevice as sd
 import time
 import sys
 import signal
 import re
 from pathlib import Path
-from core.audio_capture import AudioCapturer
-from core.audio_output import OggOpusPlayer
-from core.system_audio_capture import SystemAudioCapturer
 from core.volcengine_client import VolcengineTranslator, VolcengineConfig
-from gui.subtitle_window import SubtitleWindow, SubtitleWindowThread
+from core.logging_utils import setup_logging, ChannelLogger
+# NOTE: gui.subtitle_window 依赖 tkinter, Embedded Python 不包含 tkinter
+# 延迟到 CLI 模式实际需要时再导入（见 _init_components）
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler('realtime_translator_v2.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+# 初始化日志系统
+_logger = setup_logging(level=logging.INFO)
+sys_log = ChannelLogger(_logger, "SYS")
+ch1_log = ChannelLogger(_logger, "CH1")
+ch2_log = ChannelLogger(_logger, "CH2")
 
-logger = logging.getLogger(__name__)
+
+CH2_SOURCE_SUBTITLE_START = 650
+CH2_SOURCE_SUBTITLE_RESPONSE = 651
+CH2_SOURCE_SUBTITLE_END = 652
+CH2_TRANSLATION_SUBTITLE_START = 653
+CH2_TRANSLATION_SUBTITLE_RESPONSE = 654
+CH2_TRANSLATION_SUBTITLE_END = 655
+
+CH2_SUBTITLE_EVENTS = {
+    CH2_SOURCE_SUBTITLE_START,
+    CH2_SOURCE_SUBTITLE_RESPONSE,
+    CH2_SOURCE_SUBTITLE_END,
+    CH2_TRANSLATION_SUBTITLE_START,
+    CH2_TRANSLATION_SUBTITLE_RESPONSE,
+    CH2_TRANSLATION_SUBTITLE_END,
+}
 
 
 class DualChannelTranslator:
@@ -47,30 +56,32 @@ class DualChannelTranslator:
     Channel 2: 系统音频(英文) → 字幕窗口(中文) [s2t]
     """
 
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(self, config_path: str = "config.yaml", subtitle_callback=None):
         """
         初始化双通道翻译器
 
         Args:
             config_path: 配置文件路径
+            subtitle_callback: 字幕输出回调（桌面模式由 RuntimeService 传入，
+                               传入后跳过 Tkinter 初始化）
         """
 
-        logger.info("=" * 80)
-        logger.info("🎙️  实时同声传译器 v2.0 (双向翻译 - 耳机模式)")
-        logger.info("=" * 80)
-        logger.info("📤 Channel 1: 你说中文 → 对方听英文")
-        logger.info("📥 Channel 2: 对方说英文 → 你看中文字幕")
-        logger.info("🎧 重要: 请使用耳机，避免音频回声!")
-        logger.info("=" * 80)
+        sys_log.info("=" * 80)
+        sys_log.info("实时同声传译器 v3.0 (双向翻译 - 耳机模式)")
+        sys_log.info("=" * 80)
+        sys_log.info("Channel 1: 你说中文 → 对方听英文")
+        sys_log.info("Channel 2: 对方说英文 → 你看中文字幕")
+        sys_log.info("重要: 请使用耳机，避免音频回声!")
+        sys_log.info("=" * 80)
 
         # 加载配置
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 self.config = yaml.safe_load(f)
-            logger.info(f"✅ 配置文件加载成功: {config_path}")
+            sys_log.info("配置文件加载成功: %s", config_path)
         except FileNotFoundError:
-            logger.error(f"❌ 配置文件未找到: {config_path}")
-            logger.error("   请从 config.yaml 复制一份并重命名为 config_v2.yaml")
+            sys_log.error("配置文件未找到: %s", config_path)
+            sys_log.error("   请从 config.yaml.example 复制一份为 config.yaml")
             raise
 
         self.is_running = False
@@ -93,10 +104,16 @@ class DualChannelTranslator:
             'total_ch2_audio_bytes': 0
         }
 
-        # Channel 2 字幕聚合（避免逐词刷屏 + 中英分区显示）
+        # Channel 2 当前句状态（利用 API 的 Start/Response/End 生命周期直推前端）
         self.ch2_zh_buffer = ""
         self.ch2_en_buffer = ""
         self.ch2_last_update_time = 0.0
+        self.ch2_sentence_active = False
+        self.ch2_source_completed = False
+        self.ch2_translation_completed = False
+
+        # 字幕输出回调（桌面模式下由 RuntimeService 通过构造参数传入）
+        self.subtitle_callback = subtitle_callback
 
         # 初始化组件
         self._init_components()
@@ -111,121 +128,146 @@ class DualChannelTranslator:
             return False
         return (latin / total) > 0.55
 
-    def _is_near_duplicate_en(self, old: str, frag: str) -> bool:
-        """英文片段近重复检测（处理实时转写常见重复）"""
-        if not old or not frag:
-            return False
-
-        o = old.strip().lower()
-        f = frag.strip().lower()
-        if not o or not f:
-            return False
-
-        # 完全相同/包含
-        if o == f or f in o or o in f:
-            return True
-
-        # 词级别前后缀重叠（例如 "I think" + "I think we should"）
-        o_words = o.split()
-        f_words = f.split()
-        if len(o_words) >= 3 and len(f_words) >= 3:
-            suffix = " ".join(o_words[-4:])
-            prefix = " ".join(f_words[:4])
-            if suffix == prefix:
-                return True
-
-        # 高重叠短句也视为重复
-        if len(f_words) <= 8:
-            common = set(o_words) & set(f_words)
-            if f_words and len(common) / max(1, len(set(f_words))) >= 0.8:
-                return True
-
-        return False
-
-    def _append_dedup(self, old: str, frag: str) -> str:
-        """将片段追加到缓冲区并做去重"""
-        if not old:
-            return frag
-
-        is_en = self._is_mostly_english(old) or self._is_mostly_english(frag)
-
-        # 英文更严格去重（防止重复句）
-        if is_en and self._is_near_duplicate_en(old, frag):
-            return old if len(old) >= len(frag) else frag
-
-        # 通用包含关系去重
-        if frag in old:
-            return old
-        if old in frag:
-            return frag
-
-        sep = " " if is_en else ""
-        merged = (old + sep + frag).strip()
-
-        # 合并后去掉连续重复词（英文）
-        if is_en:
-            words = merged.split()
-            compact = []
-            for w in words:
-                if compact and compact[-1].lower() == w.lower():
-                    continue
-                compact.append(w)
-            merged = " ".join(compact)
-
-        return merged
-
-    def _append_ch2_fragment(self, fragment: str):
-        """聚合 Channel 2 文本片段，中文和英文严格分区展示"""
-        if not fragment:
-            return
-
-        frag = re.sub(r"\s+", " ", fragment.strip())
-        if not frag:
-            return
-
-        self.ch2_last_update_time = time.time()
-
-        if self._is_mostly_english(frag):
-            self.ch2_en_buffer = self._append_dedup(self.ch2_en_buffer, frag)
-        else:
-            self.ch2_zh_buffer = self._append_dedup(self.ch2_zh_buffer, frag)
-
-        # 句子边界：优先中文句末标点；英文句末也触发
-        if re.search(r"[。！？!?]$", frag):
-            self._flush_ch2_buffer()
-
-    def _flush_ch2_buffer(self, force: bool = False):
-        """输出 Channel 2 聚合文本（EN/ZH 分区）"""
-        en = self.ch2_en_buffer.strip()
-        zh = self.ch2_zh_buffer.strip()
-
-        if not en and not zh:
-            return
-
-        # 非强制时，过短片段不输出，避免单词刷屏
-        longest = max(len(en), len(zh))
-        has_sentence_end = bool(re.search(r"[。！？!?]$", en) or re.search(r"[。！？!?]$", zh))
-        if not force and longest < 12 and not has_sentence_end:
-            return
-
-        parts = []
-        if en:
-            parts.append(f"EN  {en}")
-        if zh:
-            parts.append(f"ZH  {zh}")
-
-        self.subtitle_window_thread.update_subtitle("\n".join(parts))
+    def _reset_ch2_sentence_state(self):
+        """重置 Channel 2 当前句状态。"""
         self.ch2_en_buffer = ""
         self.ch2_zh_buffer = ""
         self.ch2_last_update_time = 0.0
+        self.ch2_sentence_active = False
+        self.ch2_source_completed = False
+        self.ch2_translation_completed = False
+
+    def _emit_ch2_subtitle(self, message_type: str, is_final: bool = False):
+        """按统一消息格式输出字幕，桌面模式和 CLI 模式共用一套状态。"""
+        en = self.ch2_en_buffer.strip()
+        zh = self.ch2_zh_buffer.strip()
+
+        if self.subtitle_callback:
+            self.subtitle_callback(
+                type=message_type,
+                en=en,
+                zh=zh,
+                is_final=is_final,
+            )
+        elif self.subtitle_window_thread:
+            if message_type == "start":
+                self.subtitle_window_thread.update_subtitle("")
+                return
+
+            parts = []
+            if en:
+                parts.append(f"EN  {en}")
+            if zh:
+                parts.append(f"ZH  {zh}")
+            self.subtitle_window_thread.update_subtitle("\n".join(parts))
+
+        ch2_log.debug(
+            "字幕事件: type=%s en=%dc zh=%dc final=%s",
+            message_type,
+            len(en),
+            len(zh),
+            is_final,
+        )
+
+    def _start_ch2_sentence(self):
+        """开启新句；若上一句意外未结束，先补发结束事件。"""
+        has_content = bool(self.ch2_en_buffer.strip() or self.ch2_zh_buffer.strip())
+        if self.ch2_sentence_active and not has_content:
+            self.ch2_last_update_time = time.time()
+            return
+
+        if self.ch2_sentence_active and has_content:
+            self._finish_ch2_sentence()
+
+        self._reset_ch2_sentence_state()
+        self.ch2_sentence_active = True
+        self.ch2_last_update_time = time.time()
+        self._emit_ch2_subtitle("start", is_final=False)
+
+    def _update_ch2_buffer(self, event: int, text: str):
+        """根据事件类型更新 EN/ZH 当前句内容。"""
+        clean_text = re.sub(r"\s+", " ", text.strip())
+        if not clean_text:
+            return
+
+        is_english = self._is_mostly_english(clean_text)
+        if event in (CH2_SOURCE_SUBTITLE_RESPONSE, CH2_SOURCE_SUBTITLE_END):
+            if is_english or not self.ch2_zh_buffer:
+                self.ch2_en_buffer = clean_text
+            else:
+                self.ch2_zh_buffer = clean_text
+        else:
+            if is_english and not self.ch2_zh_buffer:
+                self.ch2_en_buffer = clean_text
+            else:
+                self.ch2_zh_buffer = clean_text
+
+        self.ch2_last_update_time = time.time()
+
+    def _finish_ch2_sentence(self) -> bool:
+        """结束当前句并推送最终字幕。"""
+        has_content = bool(self.ch2_en_buffer.strip() or self.ch2_zh_buffer.strip())
+        if not self.ch2_sentence_active and not has_content:
+            return False
+
+        if has_content:
+            self._emit_ch2_subtitle("end", is_final=True)
+
+        self._reset_ch2_sentence_state()
+        return has_content
+
+    def _flush_stale_ch2_sentence(self, timeout_seconds: float = 3.0) -> bool:
+        """在 End 丢失时，通过超时补发结束事件。"""
+        if not self.ch2_sentence_active or not self.ch2_last_update_time:
+            return False
+
+        if time.time() - self.ch2_last_update_time < timeout_seconds:
+            return False
+
+        ch2_log.warning("字幕结束事件超时缺失，已按 %.1f 秒兜底补发结束", timeout_seconds)
+        return self._finish_ch2_sentence()
+
+    def _handle_ch2_subtitle_result(self, result):
+        """处理 Channel 2 字幕事件，直接向前端推送 start/streaming/end。"""
+        if result.event not in CH2_SUBTITLE_EVENTS:
+            return
+
+        if result.event in (CH2_SOURCE_SUBTITLE_START, CH2_TRANSLATION_SUBTITLE_START):
+            self._start_ch2_sentence()
+            return
+
+        if result.text and not self.ch2_sentence_active:
+            self._start_ch2_sentence()
+
+        if result.text:
+            self._update_ch2_buffer(result.event, result.text)
+
+        if result.event in (CH2_SOURCE_SUBTITLE_RESPONSE, CH2_TRANSLATION_SUBTITLE_RESPONSE):
+            self._emit_ch2_subtitle("streaming", is_final=False)
+            return
+
+        if result.event == CH2_SOURCE_SUBTITLE_END:
+            self.ch2_source_completed = True
+            self._emit_ch2_subtitle("streaming", is_final=False)
+            if self.ch2_translation_completed:
+                self._finish_ch2_sentence()
+            return
+
+        if result.event == CH2_TRANSLATION_SUBTITLE_END:
+            self.ch2_translation_completed = True
+            self._finish_ch2_sentence()
 
     def _init_components(self):
         """初始化所有组件"""
+        import sounddevice as sd  # 延迟导入: 避免顶层加载 C 扩展
+        from core.audio_capture import AudioCapturer
+        from core.audio_output import OggOpusPlayer
+        from core.system_audio_capture import SystemAudioCapturer
 
-        logger.info("🚀 正在初始化组件...")
+        sys_log.info("正在初始化组件...")
 
         # 1. 麦克风捕获 (Channel 1 输入)
-        logger.info("\n📍 初始化 Channel 1 输入...")
+        ch1_log.info("初始化输入设备...")
         audio_config = self.config['audio']
 
         self.mic_capturer = None
@@ -236,12 +278,12 @@ class DualChannelTranslator:
                 channels=1,
                 chunk_size=1600  # 100ms @ 16kHz
             )
-            logger.info("✅ 麦克风捕获器已初始化")
+            ch1_log.info("麦克风捕获器已初始化")
         else:
-            logger.warning("⚠️  Channel 1 已禁用：跳过麦克风初始化")
+            ch1_log.warning("Channel 1 已禁用：跳过麦克风初始化")
 
         # 2. 系统音频捕获 (Channel 2 输入)
-        logger.info("\n📍 初始化 Channel 2 输入...")
+        ch2_log.info("初始化输入设备...")
         system_audio_config = audio_config['system_audio']
 
         self.system_audio_capturer = SystemAudioCapturer(
@@ -251,10 +293,10 @@ class DualChannelTranslator:
             channels=1,
             chunk_size=1600
         )
-        logger.info("✅ 系统音频捕获器已初始化")
+        ch2_log.info("系统音频捕获器已初始化")
 
         # 3. 音频播放器 (Channel 1 输出 → VB-CABLE)
-        logger.info("\n📍 初始化 Channel 1 输出...")
+        ch1_log.info("初始化输出设备...")
         self.audio_player = None
 
         if self.channel1_enabled:
@@ -264,7 +306,6 @@ class DualChannelTranslator:
             devices = sd.query_devices()
             cable_input_idx = None
             config_device_name = vbcable_config.get('device', 'CABLE Input')
-            # 搜索关键词: 配置文件中的设备名 + 常见VB-CABLE变体
             cable_keywords = [config_device_name, 'CABLE Input', 'CABLE In']
             for keyword in cable_keywords:
                 if cable_input_idx is not None:
@@ -272,52 +313,59 @@ class DualChannelTranslator:
                 for i, device in enumerate(devices):
                     if keyword in device['name'] and device['max_output_channels'] > 0:
                         cable_input_idx = i
-                        logger.info(f"✅ 找到 VB-CABLE Input: [{i}] {device['name']} (匹配关键词: '{keyword}')")
+                        ch1_log.info("找到 VB-CABLE Input: [%d] %s (关键词: '%s')", i, device['name'], keyword)
                         break
 
             if cable_input_idx is None:
-                logger.warning("⚠️  未找到 VB-CABLE Input 设备!")
-                logger.warning("   将使用默认扬声器作为输出(测试模式)")
-                logger.warning("   如需 Zoom 集成，请安装 VB-CABLE: https://vb-audio.com/Cable/")
-                logger.warning(f"   已搜索关键词: {cable_keywords}")
+                ch1_log.warning("未找到 VB-CABLE Input 设备! 将使用默认扬声器(测试模式)")
+                ch1_log.warning("已搜索关键词: %s", cable_keywords)
                 cable_input_idx = sd.default.device[1]
 
             cable_input_device = devices[cable_input_idx]['name']
-            logger.info(f"🔊 Channel 1 输出设备: {cable_input_device}")
+            ch1_log.info("输出设备: %s", cable_input_device)
 
             self.audio_player = OggOpusPlayer(
                 device_name=cable_input_device,
                 sample_rate=24000,
                 use_ffmpeg=vbcable_config.get('use_ffmpeg', True),
-                monitor_device=None,  # 耳机模式不需要监听
+                monitor_device=None,
                 enable_monitor=False
             )
-            logger.info("✅ 音频播放器已初始化")
+            ch1_log.info("音频播放器已初始化")
         else:
-            logger.warning("⚠️  Channel 1 已禁用：跳过音频播放器初始化")
+            ch1_log.warning("Channel 1 已禁用：跳过音频播放器初始化")
 
-        # 4. 字幕窗口 (Channel 2 输出)
-        logger.info("\n📍 初始化 Channel 2 输出...")
-        subtitle_config = self.config.get('subtitle_window', {})
+        # 4. 字幕窗口 (Channel 2 输出 - 仅 CLI 模式)
+        # 桌面模式下 subtitle_callback 会由 RuntimeService 注入，跳过 Tkinter
+        self.subtitle_window = None
+        self.subtitle_window_thread = None
 
-        self.subtitle_window = SubtitleWindow(
-            width=subtitle_config.get('width', 400),
-            height=subtitle_config.get('height', 800),
-            font_size=subtitle_config.get('font_size', 20),
-            bg_color=subtitle_config.get('bg_color', '#000000'),
-            text_color=subtitle_config.get('text_color', '#FFFFFF'),
-            opacity=subtitle_config.get('opacity', 0.85),
-            position=subtitle_config.get('position', 'top_right'),
-            max_history=subtitle_config.get('max_history', 1000),
-            show_timestamp=subtitle_config.get('show_timestamp', False)
-        )
+        if not self.subtitle_callback:
+            ch2_log.info("初始化字幕窗口 (CLI 模式)...")
+            # 延迟导入: tkinter 在 Embedded Python 中不可用
+            from gui.subtitle_window import SubtitleWindow, SubtitleWindowThread
+            subtitle_config = self.config.get('subtitle_window', {})
 
-        # 使用线程包装器
-        self.subtitle_window_thread = SubtitleWindowThread(self.subtitle_window)
-        logger.info("✅ 字幕窗口已初始化")
+            self.subtitle_window = SubtitleWindow(
+                width=subtitle_config.get('width', 400),
+                height=subtitle_config.get('height', 800),
+                font_size=subtitle_config.get('font_size', 20),
+                bg_color=subtitle_config.get('bg_color', '#000000'),
+                text_color=subtitle_config.get('text_color', '#FFFFFF'),
+                opacity=subtitle_config.get('opacity', 0.85),
+                position=subtitle_config.get('position', 'top_right'),
+                max_history=subtitle_config.get('max_history', 1000),
+                show_timestamp=subtitle_config.get('show_timestamp', False)
+            )
+
+            # 使用线程包装器
+            self.subtitle_window_thread = SubtitleWindowThread(self.subtitle_window)
+            ch2_log.info("字幕窗口已初始化")
+        else:
+            ch2_log.info("桌面模式：跳过 Tkinter 字幕窗口初始化")
 
         # 5. 火山引擎翻译客户端 (两个独立连接)
-        logger.info("\n📍 初始化火山引擎翻译客户端...")
+        sys_log.info("初始化火山引擎翻译客户端...")
 
         volcengine_cfg = VolcengineConfig(
             ws_url=self.config['volcengine']['ws_url'],
@@ -337,10 +385,10 @@ class DualChannelTranslator:
                 source_language=ch1_config.get('source_language', 'zh'),
                 target_language=ch1_config.get('target_language', 'en')
             )
-            logger.info("✅ Channel 1 翻译器: 中文 → 英文 (s2s)")
+            ch1_log.info("翻译器已初始化: 中文 → 英文 (s2s)")
         else:
             self.translator_zh_to_en = None
-            logger.warning("⚠️  Channel 1 已禁用")
+            ch1_log.warning("Channel 1 已禁用")
 
         # Channel 2: 英文 → 中文 (s2t)
         ch2_config = channels_config.get('en_to_zh', {})
@@ -352,12 +400,12 @@ class DualChannelTranslator:
                 source_language=ch2_config.get('source_language', 'en'),
                 target_language=ch2_config.get('target_language', 'zh')
             )
-            logger.info("✅ Channel 2 翻译器: 英文 → 中文 (s2t)")
+            ch2_log.info("翻译器已初始化: 英文 → 中文 (s2t)")
         else:
             self.translator_en_to_zh = None
-            logger.warning("⚠️  Channel 2 已禁用")
+            ch2_log.warning("Channel 2 已禁用")
 
-        logger.info("\n✅ 所有组件初始化完成")
+        sys_log.info("所有组件初始化完成")
 
     async def start(self):
         """启动双通道翻译器"""
@@ -366,53 +414,47 @@ class DualChannelTranslator:
         self.stats['start_time'] = time.time()
 
         # 1. 启动音频捕获
-        logger.info("\n🚀 启动音频捕获...")
+        sys_log.info("启动音频捕获...")
         if self.mic_capturer:
             self.mic_capturer.start()
         self.system_audio_capturer.start()
 
         # 2. 启动音频播放器
         if self.audio_player:
-            logger.info("🚀 启动音频播放器...")
+            ch1_log.info("启动音频播放器...")
             self.audio_player.start()
         else:
-            logger.info("🚀 Channel 1 音频输出已关闭（仅字幕模式）")
+            ch1_log.info("音频输出已关闭（仅字幕模式）")
 
-        # 3. 启动字幕窗口 (非阻塞)
-        logger.info("🚀 启动字幕窗口...")
-        self.subtitle_window_thread.start()
+        # 3. 启动字幕窗口 (非阻塞, 仅 CLI 模式)
+        if self.subtitle_window_thread:
+            ch2_log.info("启动字幕窗口...")
+            self.subtitle_window_thread.start()
 
         # 4. 连接火山引擎
-        logger.info("🚀 连接火山引擎...")
+        sys_log.info("连接火山引擎...")
 
         if self.translator_zh_to_en:
             await self.translator_zh_to_en.connect()
             await self.translator_zh_to_en.start_session()
-            logger.info("✅ Channel 1 已连接")
+            ch1_log.info("火山引擎已连接")
 
         if self.translator_en_to_zh:
             await self.translator_en_to_zh.connect()
             await self.translator_en_to_zh.start_session()
-            logger.info("✅ Channel 2 已连接")
+            ch2_log.info("火山引擎已连接")
 
         # 5. 打印启动信息
-        logger.info("\n" + "=" * 80)
-        logger.info("✅ 双向翻译器已启动")
-        logger.info("=" * 80)
+        sys_log.info("=" * 60)
+        sys_log.info("双向翻译器已启动")
+        sys_log.info("=" * 60)
         if self.translator_zh_to_en:
-            logger.info("📤 Channel 1: 请开始说中文...")
-            logger.info("   🔊 翻译后的英文将输出到 VB-CABLE Input")
-            logger.info("   📱 请在 Zoom 中选择: CABLE Output (VB-Audio Virtual Cable)")
+            ch1_log.info("请开始说中文... 翻译后英文输出到 VB-CABLE")
         else:
-            logger.info("📤 Channel 1: 已关闭（仅字幕模式）")
-        logger.info("")
+            ch1_log.info("已关闭（仅字幕模式）")
         if self.translator_en_to_zh:
-            logger.info("📥 Channel 2: 对方的英文语音将翻译为中文字幕")
-            logger.info("   📺 请查看屏幕右上角的字幕窗口")
-            logger.info("   🎧 请务必使用耳机，避免音频回声!")
-            logger.info("")
-        logger.info("   ⌨️  按 Ctrl+C 停止并查看统计")
-        logger.info("=" * 80 + "\n")
+            ch2_log.info("对方英文语音将翻译为中文字幕")
+        sys_log.info("按 Ctrl+C 停止并查看统计")
 
         # 6. 启动主循环
         await self._main_loop()
@@ -426,7 +468,7 @@ class DualChannelTranslator:
 
         async def channel1_loop():
             """Channel 1: 麦克风 → 英文语音"""
-            logger.info("📤 Channel 1 已启动: 中文 → 英文")
+            ch1_log.info("通道已启动: 中文 → 英文")
 
             async def send_audio():
                 """发送音频循环"""
@@ -453,33 +495,26 @@ class DualChannelTranslator:
                             if result.audio_data and not self.stats['first_ch1_audio_time']:
                                 self.stats['first_ch1_audio_time'] = time.time()
                                 first_delay = self.stats['first_ch1_audio_time'] - self.stats['start_time']
-                                logger.info(f"⏱️  Channel 1 首次音频延迟: {first_delay:.2f}秒")
+                                ch1_log.info("首次音频延迟: %.2f秒", first_delay)
 
                             # 处理文本
                             if result.text:
                                 self.stats['ch1_text_segments'] += 1
-                                # 详细日志改为DEBUG级别
-                                logger.debug(f"📝 [CH1-{self.stats['ch1_text_segments']}] 英文: {result.text}")
+                                ch1_log.debug("← text #%d %r", self.stats['ch1_text_segments'], result.text)
 
-                                # 每20条记录一次摘要
                                 if self.stats['ch1_text_segments'] % 20 == 0:
-                                    logger.info(f"📊 Channel 1 进度: 已接收 {self.stats['ch1_text_segments']} 条文本")
+                                    ch1_log.info("进度: 已接收 %d 条文本", self.stats['ch1_text_segments'])
 
                             # 处理音频
                             if result.audio_data:
                                 self.stats['ch1_audio_received'] += 1
                                 self.stats['total_ch1_audio_bytes'] += len(result.audio_data)
 
-                                # 详细日志改为DEBUG级别
-                                logger.debug(
-                                    f"🔊 [CH1] 音频块 [{self.stats['ch1_audio_received']}] "
-                                    f"{len(result.audio_data)} bytes"
-                                )
+                                ch1_log.debug("← audio #%d %dB", self.stats['ch1_audio_received'], len(result.audio_data))
 
-                                # 每50个音频块记录一次摘要
                                 if self.stats['ch1_audio_received'] % 50 == 0:
                                     mb = self.stats['total_ch1_audio_bytes'] / 1024 / 1024
-                                    logger.info(f"📊 Channel 1 音频: 已接收 {self.stats['ch1_audio_received']} 块, 共 {mb:.2f}MB")
+                                    ch1_log.info("音频进度: %d 块, %.2fMB", self.stats['ch1_audio_received'], mb)
 
                                 # 播放音频到 VB-CABLE
                                 self.audio_player.play(result.audio_data)
@@ -487,13 +522,13 @@ class DualChannelTranslator:
                     except asyncio.TimeoutError:
                         pass
                     except Exception as e:
-                        logger.error(f"❌ Channel 1 接收错误: {e}")
+                        ch1_log.error("接收错误: %s", e)
 
             await asyncio.gather(send_audio(), receive_result())
 
         async def channel2_loop():
             """Channel 2: 系统音频 → 中文字幕"""
-            logger.info("📥 Channel 2 已启动: 英文 → 中文")
+            ch2_log.info("通道已启动: 英文 → 中文")
 
             async def send_audio():
                 """发送音频循环"""
@@ -517,31 +552,34 @@ class DualChannelTranslator:
 
                         if result:
                             # 记录首次文本时间
-                            if result.text and not self.stats['first_ch2_text_time']:
+                            if (
+                                result.text
+                                and result.event in CH2_SUBTITLE_EVENTS
+                                and not self.stats['first_ch2_text_time']
+                            ):
                                 self.stats['first_ch2_text_time'] = time.time()
                                 first_delay = self.stats['first_ch2_text_time'] - self.stats['start_time']
-                                logger.info(f"⏱️  Channel 2 首次文本延迟: {first_delay:.2f}秒")
+                                ch2_log.info("首次文本延迟: %.2f秒", first_delay)
 
-                            # 处理文本
-                            if result.text:
+                            # 仅处理字幕生命周期事件，避免把其他文本事件误当成 CH2 字幕
+                            if result.event in CH2_SUBTITLE_EVENTS:
                                 self.stats['ch2_text_segments'] += 1
-                                # 详细日志改为DEBUG级别
-                                logger.debug(f"📝 [CH2-{self.stats['ch2_text_segments']}] 中文: {result.text}")
+                                ch2_log.debug(
+                                    "← 字幕事件 #%d event=%s text=%r",
+                                    self.stats['ch2_text_segments'],
+                                    result.event,
+                                    result.text,
+                                )
 
-                                # 每20条记录一次摘要
                                 if self.stats['ch2_text_segments'] % 20 == 0:
-                                    logger.info(f"📊 Channel 2 进度: 已接收 {self.stats['ch2_text_segments']} 条字幕")
+                                    ch2_log.info("进度: 已接收 %d 条字幕", self.stats['ch2_text_segments'])
 
-                                # 聚合后再展示（尽量按句子输出）
-                                self._append_ch2_fragment(result.text)
+                                self._handle_ch2_subtitle_result(result)
 
                     except asyncio.TimeoutError:
-                        # 片段静默超过阈值则强制输出，避免一直不显示
-                        if (self.ch2_en_buffer or self.ch2_zh_buffer) and self.ch2_last_update_time:
-                            if time.time() - self.ch2_last_update_time > 1.2:
-                                self._flush_ch2_buffer(force=True)
+                        self._flush_stale_ch2_sentence(timeout_seconds=3.0)
                     except Exception as e:
-                        logger.error(f"❌ Channel 2 接收错误: {e}")
+                        ch2_log.error("接收错误: %s", e)
 
             await asyncio.gather(send_audio(), receive_result())
 
@@ -552,11 +590,15 @@ class DualChannelTranslator:
                     self.subtitle_window_thread.process_events()
                     await asyncio.sleep(0.05)  # 20fps 足够流畅
                 except Exception as e:
-                    logger.warning(f"⚠️  UI 事件处理错误: {e}")
+                    sys_log.warning("UI 事件处理错误: %s", e)
 
-        # 并发执行三个循环
+        # 并发执行
         try:
-            tasks = [ui_event_loop()]
+            tasks = []
+
+            # UI 事件循环仅在 CLI 模式（有 Tkinter 字幕窗口）时启动
+            if self.subtitle_window_thread:
+                tasks.append(ui_event_loop())
 
             if self.translator_zh_to_en:
                 tasks.append(channel1_loop())
@@ -566,12 +608,12 @@ class DualChannelTranslator:
 
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
-            logger.info("🛑 主循环被取消")
+            sys_log.info("主循环被取消")
 
     async def stop(self):
         """停止双通道翻译器"""
 
-        logger.info("\n🛑 正在停止翻译器...")
+        sys_log.info("正在停止翻译器...")
 
         self.is_running = False
 
@@ -580,8 +622,8 @@ class DualChannelTranslator:
             self.mic_capturer.stop()
         self.system_audio_capturer.stop()
 
-        # 停止前尽量输出剩余字幕片段
-        self._flush_ch2_buffer(force=True)
+        # 停止前尽量补发剩余字幕，避免最后一句丢失
+        self._finish_ch2_sentence()
 
         # 关闭翻译客户端
         if self.translator_zh_to_en:
@@ -595,43 +637,40 @@ class DualChannelTranslator:
             self.audio_player.stop()
 
         # 关闭字幕窗口
-        self.subtitle_window_thread.stop()
+        if self.subtitle_window_thread:
+            self.subtitle_window_thread.stop()
 
         # 打印统计
         self._print_stats()
 
-        logger.info("✅ 翻译器已停止")
+        sys_log.info("翻译器已停止")
 
     def _print_stats(self):
         """打印统计信息"""
 
         total_time = time.time() - self.stats['start_time']
 
-        logger.info("\n" + "=" * 80)
-        logger.info("📊 会话统计")
-        logger.info("=" * 80)
-        logger.info(f"⏱️  总时长: {total_time:.2f}秒")
-        logger.info("")
-        logger.info("📤 Channel 1 (中文 → 英文):")
-        logger.info(f"   📤 发送音频块: {self.stats['ch1_audio_chunks']}")
-        logger.info(f"   📝 接收文本片段: {self.stats['ch1_text_segments']}")
-        logger.info(f"   🔊 接收音频块: {self.stats['ch1_audio_received']}")
-        logger.info(f"   📦 总音频量: {self.stats['total_ch1_audio_bytes'] / 1024:.2f} KB")
+        sys_log.info("=" * 60)
+        sys_log.info("会话统计 | 总时长: %.2f秒", total_time)
+        ch1_log.info("发送: %d 块 | 文本: %d 段 | 音频: %d 块 %.2fKB",
+                     self.stats['ch1_audio_chunks'],
+                     self.stats['ch1_text_segments'],
+                     self.stats['ch1_audio_received'],
+                     self.stats['total_ch1_audio_bytes'] / 1024)
 
         if self.stats['first_ch1_audio_time']:
             first_delay = self.stats['first_ch1_audio_time'] - self.stats['start_time']
-            logger.info(f"   ⏳ 首次响应: {first_delay:.2f}秒")
+            ch1_log.info("首次响应: %.2f秒", first_delay)
 
-        logger.info("")
-        logger.info("📥 Channel 2 (英文 → 中文):")
-        logger.info(f"   📤 发送音频块: {self.stats['ch2_audio_chunks']}")
-        logger.info(f"   📝 接收文本片段: {self.stats['ch2_text_segments']}")
+        ch2_log.info("发送: %d 块 | 字幕: %d 段",
+                     self.stats['ch2_audio_chunks'],
+                     self.stats['ch2_text_segments'])
 
         if self.stats['first_ch2_text_time']:
             first_delay = self.stats['first_ch2_text_time'] - self.stats['start_time']
-            logger.info(f"   ⏳ 首次响应: {first_delay:.2f}秒")
+            ch2_log.info("首次响应: %.2f秒", first_delay)
 
-        logger.info("=" * 80)
+        sys_log.info("=" * 60)
 
 
 async def main():
@@ -641,14 +680,14 @@ async def main():
     config_file = "config.yaml"
     if len(sys.argv) > 1:
         config_file = sys.argv[1]
-        logger.info(f"📝 使用配置文件: {config_file}")
+        sys_log.info("使用配置文件: %s", config_file)
 
     translator = DualChannelTranslator(config_path=config_file)
 
     # 信号处理器
     def signal_handler(signum, frame):
         """处理 SIGINT 信号 (Ctrl+C)"""
-        logger.info("\n⌨️  接收到中断信号，正在停止...")
+        sys_log.info("接收到中断信号，正在停止...")
         translator.is_running = False
 
     # 注册信号处理器
@@ -657,12 +696,11 @@ async def main():
     try:
         await translator.start()
     except KeyboardInterrupt:
-        logger.info("\n⌨️  捕获到 KeyboardInterrupt")
+        sys_log.info("捕获到 KeyboardInterrupt")
     except Exception as e:
-        logger.error(f"\n❌ 错误: {e}", exc_info=True)
+        sys_log.error("错误: %s", e, exc_info=True)
     finally:
-        # 确保无论如何都会执行清理
-        logger.info("🧹 执行清理...")
+        sys_log.info("执行清理...")
         await translator.stop()
 
 
@@ -670,6 +708,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("\n⌨️  程序已终止")
+        sys_log.info("程序已终止")
     except Exception as e:
-        logger.error(f"\n❌ 致命错误: {e}", exc_info=True)
+        sys_log.error("致命错误: %s", e, exc_info=True)

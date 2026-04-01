@@ -13,6 +13,12 @@ tests/**
 
 # 缓存相关
 **/__pycache__/**
+.ccb/
+.claude/
+.ccb-tmp-tests/
+.ccb-tmp-tests-titlebar/
+bash.exe.stackdump
+ccb
 
 # 火山引擎protobuf相关
 **/python_protogen/**
@@ -21,3 +27,7 @@ tests/**
 **.spec
 **/build/**
 **/dist/**
+bundle/
+src-tauri/_bundle
+src-tauri/target/
+node_modules/
