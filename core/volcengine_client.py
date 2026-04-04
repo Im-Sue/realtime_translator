@@ -8,6 +8,7 @@ import uuid
 import logging
 import sys
 import types
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Callable
@@ -137,6 +138,8 @@ class VolcengineTranslator:
         mode: str = "s2s",
         source_language: str = "zh",
         target_language: str = "en",
+        target_audio_format: str = "ogg_opus",
+        target_audio_rate: int = 24000,
         result_callback: Optional[Callable] = None,
         auto_reconnect: bool = True,
         max_retry_attempts: int = 3,
@@ -151,6 +154,8 @@ class VolcengineTranslator:
             mode: 翻译模式 ("s2s"=语音转语音, "s2t"=语音转文本)
             source_language: 源语言 ("zh"=中文, "en"=英文)
             target_language: 目标语言
+            target_audio_format: 目标音频格式(默认ogg_opus,支持pcm)
+            target_audio_rate: 目标音频采样率
             result_callback: 结果回调函数
             auto_reconnect: 是否自动重连 (默认True)
             max_retry_attempts: 最大重试次数 (默认3)
@@ -180,8 +185,65 @@ class VolcengineTranslator:
         self.source_audio_bits = 16
         self.source_audio_channel = 1
 
-        self.target_audio_format = "ogg_opus"
-        self.target_audio_rate = 24000
+        self.target_audio_format = target_audio_format
+        self.target_audio_rate = target_audio_rate
+        self._pending_first_audio_packet_validation = True
+        self._debug_audio_packet_count = 0
+        self._debug_audio_bytes_total = 0
+        self._debug_last_audio_size = 0
+        self._debug_last_audio_sequence = 0
+        self._debug_last_audio_event = 0
+        self._debug_last_audio_delta_ms = 0.0
+        self._debug_last_audio_time = None
+        self._debug_first_audio_time = None
+
+    def _record_audio_packet_debug(self, event: int, sequence: int, audio_size: int):
+        """记录音频回包诊断信息，供主线程聚合输出。"""
+        now = time.perf_counter()
+        if self._debug_last_audio_time is None:
+            self._debug_first_audio_time = now
+            self._debug_last_audio_delta_ms = 0.0
+        else:
+            self._debug_last_audio_delta_ms = (now - self._debug_last_audio_time) * 1000
+
+        self._debug_last_audio_time = now
+        self._debug_audio_packet_count += 1
+        self._debug_audio_bytes_total += audio_size
+        self._debug_last_audio_size = audio_size
+        self._debug_last_audio_sequence = sequence
+        self._debug_last_audio_event = event
+
+    def get_debug_snapshot(self) -> dict:
+        """返回当前翻译链路的诊断快照。"""
+        bytes_per_sample = 2 if self.target_audio_format == "pcm" else 1
+        channels = 1 if self.target_audio_format == "pcm" else 1
+        denominator = self.target_audio_rate * bytes_per_sample * channels
+        estimated_audio_seconds = (
+            self._debug_audio_bytes_total / denominator if denominator > 0 else 0.0
+        )
+
+        return {
+            "audio_packet_count": self._debug_audio_packet_count,
+            "audio_bytes_total": self._debug_audio_bytes_total,
+            "last_audio_size": self._debug_last_audio_size,
+            "last_audio_sequence": self._debug_last_audio_sequence,
+            "last_audio_event": self._debug_last_audio_event,
+            "last_audio_delta_ms": round(self._debug_last_audio_delta_ms, 1),
+            "estimated_audio_seconds": round(estimated_audio_seconds, 2),
+        }
+
+    def _validate_first_audio_packet(self, data: bytes) -> bool:
+        """校验首个音频包是否符合当前配置的基础格式特征。"""
+        if not data:
+            return False
+
+        if self.target_audio_format == "pcm":
+            return (len(data) % 2) == 0
+
+        if self.target_audio_format == "ogg_opus":
+            return data.startswith(b"OggS")
+
+        return True
 
     async def connect(self):
         """建立WebSocket连接"""
@@ -259,6 +321,9 @@ class VolcengineTranslator:
             if self.mode == "s2s":
                 request.target_audio.format = self.target_audio_format
                 request.target_audio.rate = self.target_audio_rate
+                if self.target_audio_format == "pcm":
+                    request.target_audio.bits = 16
+                    request.target_audio.channel = 1
 
             # 翻译参数
             request.request.mode = self.mode
@@ -272,6 +337,8 @@ class VolcengineTranslator:
             logger.info(f"   源音频: {self.source_audio_format}, {self.source_audio_rate}Hz, {self.source_audio_bits}bit, {self.source_audio_channel}ch")
             if self.mode == "s2s":
                 logger.info(f"   目标音频格式: {self.target_audio_format}, {self.target_audio_rate}Hz")
+                if self.target_audio_format == "pcm":
+                    logger.info("   目标音频位深/声道: 16bit, 1ch")
                 logger.info(f"   ⚠️  request.target_audio.format = {request.target_audio.format}")
                 logger.info(f"   ⚠️  request.target_audio.rate = {request.target_audio.rate}")
                 # 检查target_audio是否为空
@@ -300,6 +367,7 @@ class VolcengineTranslator:
                 raise RuntimeError(error_msg)
 
             self.is_session_active = True
+            self._pending_first_audio_packet_validation = True
             logger.info(f"✅ 翻译会话已启动 (ID: {self.session_id})")
             logger.info(f"   模式: {self.mode}, {self.source_language}→{self.target_language}")
 
@@ -381,6 +449,24 @@ class VolcengineTranslator:
                 is_failed=(response.event in [Type.SessionFailed, Type.SessionCanceled]),
                 error_message=response.response_meta.Message if response.response_meta.Message else ""
             )
+
+            if result.audio_data:
+                self._record_audio_packet_debug(
+                    event=result.event,
+                    sequence=result.sequence,
+                    audio_size=len(result.audio_data),
+                )
+
+            if result.audio_data and self._pending_first_audio_packet_validation:
+                is_valid = self._validate_first_audio_packet(result.audio_data)
+                if not is_valid:
+                    logger.warning(
+                        "首个音频包校验未通过: format=%s rate=%s bytes=%s",
+                        self.target_audio_format,
+                        self.target_audio_rate,
+                        len(result.audio_data),
+                    )
+                self._pending_first_audio_packet_validation = False
 
             # 检查会话状态
             if result.is_finished:

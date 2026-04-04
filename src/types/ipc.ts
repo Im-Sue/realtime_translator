@@ -37,9 +37,27 @@ export interface VolcengineConfig {
 }
 
 export interface AudioConfig {
-  microphone: { device: string };
-  system_audio: { device: string; fallback_device: string };
-  vbcable_output: { device: string; use_ffmpeg: boolean };
+  microphone: {
+    device: string;
+    sample_rate: number;
+    channels: number;
+    chunk_size: number;
+  };
+  system_audio: {
+    device: string;
+    fallback_device: string;
+    sample_rate: number;
+    channels: number;
+    chunk_size: number;
+  };
+  vbcable_output: {
+    device: string;
+    sample_rate: number;
+    target_format: string;
+    use_ffmpeg: boolean;
+    monitor_device: string | null;
+    enable_monitor: boolean;
+  };
 }
 
 export interface ChannelConfig {

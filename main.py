@@ -261,7 +261,7 @@ class DualChannelTranslator:
         """初始化所有组件"""
         import sounddevice as sd  # 延迟导入: 避免顶层加载 C 扩展
         from core.audio_capture import AudioCapturer
-        from core.audio_output import OggOpusPlayer
+        from core.audio_output import OggOpusPlayer, PcmStreamPlayer
         from core.system_audio_capture import SystemAudioCapturer
 
         sys_log.info("正在初始化组件...")
@@ -301,6 +301,11 @@ class DualChannelTranslator:
 
         if self.channel1_enabled:
             vbcable_config = audio_config['vbcable_output']
+            target_format = vbcable_config.get('target_format', 'ogg_opus')
+            output_sample_rate = vbcable_config.get(
+                'sample_rate',
+                48000 if target_format == 'pcm' else 24000
+            )
 
             # 查找 VB-CABLE Input 设备
             devices = sd.query_devices()
@@ -323,14 +328,29 @@ class DualChannelTranslator:
 
             cable_input_device = devices[cable_input_idx]['name']
             ch1_log.info("输出设备: %s", cable_input_device)
-
-            self.audio_player = OggOpusPlayer(
-                device_name=cable_input_device,
-                sample_rate=24000,
-                use_ffmpeg=vbcable_config.get('use_ffmpeg', True),
-                monitor_device=None,
-                enable_monitor=False
+            ch1_log.info(
+                "输出设备能力: 输出通道=%s 默认采样率=%sHz 目标格式=%s 目标采样率=%sHz",
+                devices[cable_input_idx]['max_output_channels'],
+                devices[cable_input_idx]['default_samplerate'],
+                target_format,
+                output_sample_rate,
             )
+
+            if target_format == 'pcm':
+                self.audio_player = PcmStreamPlayer(
+                    device_name=cable_input_device,
+                    output_rate=output_sample_rate,
+                    channels=2,
+                    api_channels=1,
+                )
+            else:
+                self.audio_player = OggOpusPlayer(
+                    device_name=cable_input_device,
+                    sample_rate=24000,
+                    use_ffmpeg=vbcable_config.get('use_ffmpeg', True),
+                    monitor_device=None,
+                    enable_monitor=False
+                )
             ch1_log.info("音频播放器已初始化")
         else:
             ch1_log.warning("Channel 1 已禁用：跳过音频播放器初始化")
@@ -377,13 +397,20 @@ class DualChannelTranslator:
         # Channel 1: 中文 → 英文 (s2s)
         channels_config = self.config.get('channels', {})
         ch1_config = channels_config.get('zh_to_en', {})
+        ch1_target_format = audio_config.get('vbcable_output', {}).get('target_format', 'ogg_opus')
+        ch1_target_rate = audio_config.get('vbcable_output', {}).get(
+            'sample_rate',
+            48000 if ch1_target_format == 'pcm' else 24000
+        )
 
         if self.channel1_enabled:
             self.translator_zh_to_en = VolcengineTranslator(
                 config=volcengine_cfg,
                 mode=ch1_config.get('mode', 's2s'),
                 source_language=ch1_config.get('source_language', 'zh'),
-                target_language=ch1_config.get('target_language', 'en')
+                target_language=ch1_config.get('target_language', 'en'),
+                target_audio_format=ch1_target_format,
+                target_audio_rate=ch1_target_rate,
             )
             ch1_log.info("翻译器已初始化: 中文 → 英文 (s2s)")
         else:
@@ -472,14 +499,13 @@ class DualChannelTranslator:
 
             async def send_audio():
                 """发送音频循环"""
+                loop = asyncio.get_running_loop()
                 while self.is_running:
-                    chunk = self.mic_capturer.get_chunk(timeout=0.1)
+                    chunk = await loop.run_in_executor(None, self.mic_capturer.get_chunk, 0.1)
 
                     if chunk:
                         await self.translator_zh_to_en.send_audio(chunk)
                         self.stats['ch1_audio_chunks'] += 1
-
-                    await asyncio.sleep(0.01)
 
             async def receive_result():
                 """接收结果循环"""
@@ -526,20 +552,65 @@ class DualChannelTranslator:
 
             await asyncio.gather(send_audio(), receive_result())
 
+        async def channel1_diagnostics_loop():
+            """定期输出 CH1 诊断快照，辅助判断是上游稀疏还是输出侧断流。"""
+            while self.is_running:
+                try:
+                    await asyncio.sleep(5.0)
+
+                    if not self.translator_zh_to_en or not self.audio_player:
+                        continue
+
+                    translator_snapshot = None
+                    if hasattr(self.translator_zh_to_en, "get_debug_snapshot"):
+                        translator_snapshot = self.translator_zh_to_en.get_debug_snapshot()
+
+                    player_snapshot = None
+                    if hasattr(self.audio_player, "get_debug_snapshot"):
+                        player_snapshot = self.audio_player.get_debug_snapshot()
+
+                    if translator_snapshot:
+                        ch1_log.info(
+                            "CH1上游诊断: 音频包=%s 累计=%sB 估算音频=%.2fs 最近包=%sB seq=%s 间隔=%sms",
+                            translator_snapshot["audio_packet_count"],
+                            translator_snapshot["audio_bytes_total"],
+                            translator_snapshot["estimated_audio_seconds"],
+                            translator_snapshot["last_audio_size"],
+                            translator_snapshot["last_audio_sequence"],
+                            translator_snapshot["last_audio_delta_ms"],
+                        )
+
+                    if player_snapshot:
+                        ch1_log.info(
+                            "CH1播放诊断: state=%s 缓冲=%.1fms 样本=%s 输入包=%s 输入=%sB 已写=%.2fs 已播=%.2fs underflow=%s rebuffer=%s dropped=%s 静音回调=%s",
+                            player_snapshot["state"],
+                            player_snapshot["buffered_ms"],
+                            player_snapshot["buffered_samples"],
+                            player_snapshot["packet_count"],
+                            player_snapshot["input_bytes_total"],
+                            player_snapshot["written_seconds"],
+                            player_snapshot["played_seconds"],
+                            player_snapshot["underflow_total"],
+                            player_snapshot["rebuffer_count"],
+                            player_snapshot["dropped_samples"],
+                            player_snapshot["silence_callback_count"],
+                        )
+                except Exception as e:
+                    ch1_log.warning("CH1诊断循环错误: %s", e)
+
         async def channel2_loop():
             """Channel 2: 系统音频 → 中文字幕"""
             ch2_log.info("通道已启动: 英文 → 中文")
 
             async def send_audio():
                 """发送音频循环"""
+                loop = asyncio.get_running_loop()
                 while self.is_running:
-                    chunk = self.system_audio_capturer.get_chunk(timeout=0.1)
+                    chunk = await loop.run_in_executor(None, self.system_audio_capturer.get_chunk, 0.1)
 
                     if chunk:
                         await self.translator_en_to_zh.send_audio(chunk)
                         self.stats['ch2_audio_chunks'] += 1
-
-                    await asyncio.sleep(0.01)
 
             async def receive_result():
                 """接收结果循环"""
@@ -602,6 +673,7 @@ class DualChannelTranslator:
 
             if self.translator_zh_to_en:
                 tasks.append(channel1_loop())
+                tasks.append(channel1_diagnostics_loop())
 
             if self.translator_en_to_zh:
                 tasks.append(channel2_loop())

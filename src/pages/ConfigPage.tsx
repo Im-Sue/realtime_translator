@@ -262,6 +262,30 @@ export function ConfigPage({ running, sendCommand }: ConfigPageProps) {
             FFmpeg 解码
           </label>
         </div>
+        <div className="form-row">
+          <label className="form-label">输出格式</label>
+          <input
+            className="form-input"
+            value={config.audio?.vbcable_output?.target_format || 'pcm'}
+            onChange={e => updateField('audio.vbcable_output.target_format', e.target.value)}
+            disabled={disabled}
+            placeholder="pcm"
+          />
+        </div>
+        <div className="form-row">
+          <label className="form-label">输出采样率</label>
+          <input
+            className="form-input"
+            type="number"
+            value={config.audio?.vbcable_output?.sample_rate ?? 48000}
+            onChange={e => updateField('audio.vbcable_output.sample_rate', Number(e.target.value))}
+            disabled={disabled}
+            style={{ maxWidth: 120 }}
+          />
+          <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+            CH1 PCM 直出建议保持 48000Hz
+          </span>
+        </div>
       </CollapsePanel>
 
       {/* 翻译通道 */}

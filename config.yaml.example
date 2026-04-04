@@ -48,8 +48,9 @@ audio:
 
   vbcable_output:
     device: "CABLE Input"         # Windows: CABLE Input / macOS: 扬声器名
-    sample_rate: 24000
-    use_ffmpeg: true              # Ogg Opus 解码，macOS 可设为 false
+    sample_rate: 48000            # PCM 直出推荐 48000Hz
+    target_format: "pcm"          # 可选: pcm / ogg_opus
+    use_ffmpeg: true              # target_format=ogg_opus 时用于解码，macOS 可设为 false
     monitor_device: null
     enable_monitor: false
 

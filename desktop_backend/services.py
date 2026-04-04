@@ -41,7 +41,8 @@ DEFAULT_CONFIG = {
         },
         "vbcable_output": {
             "device": "",
-            "sample_rate": 24000,
+            "sample_rate": 48000,
+            "target_format": "pcm",
             "use_ffmpeg": True,
             "monitor_device": None,
             "enable_monitor": False,
@@ -67,6 +68,17 @@ DEFAULT_CONFIG = {
         "text_color": "#FFFFFF",
     },
 }
+
+
+def _deep_merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """深度合并配置，确保旧配置也能补齐新增字段。"""
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _resolve_config_dir() -> str:
@@ -118,7 +130,8 @@ class ConfigService:
             self._data = copy.deepcopy(DEFAULT_CONFIG)
             return self.get_safe_config()
         with open(self.config_path, 'r', encoding='utf-8') as f:
-            self._data = yaml.safe_load(f) or {}
+            loaded = yaml.safe_load(f) or {}
+        self._data = _deep_merge_config(DEFAULT_CONFIG, loaded)
         return self.get_safe_config()
 
     def save(self, data: dict) -> dict:
@@ -135,12 +148,14 @@ class ConfigService:
                 # 脱敏值 → 恢复原始密钥
                 volc_new[key] = volc_old.get(key, "")
 
-        self._data = data
+        # 统一按默认模板补齐缺失字段，避免旧配置保存后继续缺字段
+        normalized = _deep_merge_config(DEFAULT_CONFIG, data)
+        self._data = normalized
         config_dir = os.path.dirname(self.config_path)
         if config_dir and not os.path.exists(config_dir):
             os.makedirs(config_dir, exist_ok=True)
         with open(self.config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+            yaml.dump(normalized, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
         return {"saved": True}
 
     def get_safe_config(self) -> dict:

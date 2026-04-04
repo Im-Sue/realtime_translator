@@ -123,6 +123,14 @@ fn launch_sidecar(app: AppHandle, state: State<SidecarState>) -> Result<u16, Str
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
+    // Windows: 隐藏 Python sidecar 的控制台窗口
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
     // 生产模式: 设置工作目录为 backend/
     if let Some(ref wd) = work_dir {
         cmd.current_dir(wd);

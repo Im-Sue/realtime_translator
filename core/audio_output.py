@@ -9,6 +9,8 @@ import logging
 from typing import Optional
 import queue
 import threading
+import enum
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -576,6 +578,255 @@ class OggOpusPlayer(AudioPlayer):
             self._start_ffmpeg_process()
         except Exception as e:
             logger.error(f"❌ 发送数据到FFmpeg失败: {e}")
+
+
+class PcmStreamPlayer(AudioPlayer):
+    """PCM流式播放器，使用环形缓冲直接输出到VB-CABLE。"""
+
+    class _State(enum.IntEnum):
+        PREFILL = 0
+        PLAYING = 1
+        REBUFFERING = 2
+
+    def __init__(
+        self,
+        device_name: str,
+        output_rate: int = 48000,
+        channels: int = 2,
+        api_channels: int = 1,
+        prefill_ms: int = 120,
+        low_watermark_ms: int = 40,
+        resume_watermark_ms: int = 100,
+    ):
+        super().__init__(device_name, sample_rate=output_rate, channels=channels)
+
+        self.output_rate = output_rate
+        self.api_channels = api_channels
+        self.prefill_ms = prefill_ms
+        self.low_watermark_ms = low_watermark_ms
+        self.resume_watermark_ms = resume_watermark_ms
+
+        self._lock = threading.Lock()
+        # 30秒缓冲: 火山API按句级突发推送(1-5秒/次), 需足够空间吸收
+        self._capacity = max(1, int(self.output_rate * self.channels * 30))
+        self._ring_buffer = np.zeros(self._capacity, dtype=np.int16)
+        self._read_pos = 0
+        self._write_pos = 0
+        self._available_samples = 0
+
+        self._state = self._State.PREFILL
+        self._underflow_count = 0
+        self._prefill_samples = max(1, int(self.output_rate * self.channels * self.prefill_ms / 1000))
+        self._low_watermark_samples = max(1, int(self.output_rate * self.channels * self.low_watermark_ms / 1000))
+        self._resume_samples = max(1, int(self.output_rate * self.channels * self.resume_watermark_ms / 1000))
+
+        self._dropped_samples = 0
+        self._total_written_samples = 0
+        self._total_played_samples = 0
+        self._last_available_samples = 0
+        self._input_packet_count = 0
+        self._input_bytes_total = 0
+        self._last_input_bytes = 0
+        self._last_input_at = 0.0
+        self._underflow_total = 0
+        self._rebuffer_count = 0
+        self._prefill_ready_count = 0
+        self._silence_callback_count = 0
+
+    def start(self):
+        """启动PCM播放器。"""
+        if self.is_running:
+            logger.warning("播放器已在运行")
+            return
+
+        self.is_running = True
+        self.playback_thread = threading.Thread(target=self._playback_loop, daemon=True)
+        self.playback_thread.start()
+
+        device_info = sd.query_devices(self.device_index)
+        logger.info("PCM音频播放器已启动: %s", device_info['name'])
+
+    def stop(self):
+        """停止PCM播放器。"""
+        if not self.is_running:
+            return
+
+        self.is_running = False
+
+        if self.playback_thread:
+            self.playback_thread.join(timeout=2.0)
+
+        logger.info("PCM音频播放器已停止")
+
+    def clear_queue(self):
+        """重置环形缓冲并恢复到预缓冲状态。"""
+        with self._lock:
+            self._read_pos = 0
+            self._write_pos = 0
+            self._available_samples = 0
+            self._state = self._State.PREFILL
+            self._underflow_count = 0
+            self._last_available_samples = 0
+
+    def _ring_available(self) -> int:
+        """返回当前可读样本数。"""
+        return self._available_samples
+
+    def _ring_write(self, data: np.ndarray) -> int:
+        """写入环形缓冲，满时丢弃最旧数据。"""
+        if data.size == 0:
+            return 0
+
+        if data.size >= self._capacity:
+            data = data[-self._capacity:]
+
+        incoming = int(data.size)
+        overflow = max(0, self._available_samples + incoming - self._capacity)
+        if overflow > 0:
+            self._read_pos = (self._read_pos + overflow) % self._capacity
+            self._available_samples -= overflow
+            self._dropped_samples += overflow
+
+        first_part = min(incoming, self._capacity - self._write_pos)
+        self._ring_buffer[self._write_pos:self._write_pos + first_part] = data[:first_part]
+        remaining = incoming - first_part
+        if remaining > 0:
+            self._ring_buffer[:remaining] = data[first_part:]
+
+        self._write_pos = (self._write_pos + incoming) % self._capacity
+        self._available_samples += incoming
+        self._total_written_samples += incoming
+        self._last_available_samples = self._available_samples
+        return incoming
+
+    def _ring_read(self, count: int) -> np.ndarray:
+        """读取最多 count 个样本，不足时返回已有数据。"""
+        if count <= 0 or self._available_samples <= 0:
+            return np.empty(0, dtype=np.int16)
+
+        actual = min(count, self._available_samples)
+        data = np.empty(actual, dtype=np.int16)
+
+        first_part = min(actual, self._capacity - self._read_pos)
+        data[:first_part] = self._ring_buffer[self._read_pos:self._read_pos + first_part]
+        remaining = actual - first_part
+        if remaining > 0:
+            data[first_part:] = self._ring_buffer[:remaining]
+
+        self._read_pos = (self._read_pos + actual) % self._capacity
+        self._available_samples -= actual
+        self._total_played_samples += actual
+        self._last_available_samples = self._available_samples
+        return data
+
+    def play(self, audio_data: bytes):
+        """接收PCM字节流，必要时上混为立体声后写入环形缓冲。"""
+        if not self.is_running or not audio_data:
+            return
+
+        mono = np.frombuffer(audio_data, dtype=np.int16)
+        if mono.size == 0:
+            return
+
+        if self.api_channels == 1 and self.channels == 2:
+            output = np.empty(mono.size * 2, dtype=np.int16)
+            output[0::2] = mono
+            output[1::2] = mono
+        else:
+            output = mono
+
+        with self._lock:
+            self._input_packet_count += 1
+            self._input_bytes_total += len(audio_data)
+            self._last_input_bytes = len(audio_data)
+            self._last_input_at = time.perf_counter()
+            self._ring_write(output)
+
+    def get_debug_snapshot(self) -> dict:
+        """返回播放器内部缓冲与状态快照。"""
+        with self._lock:
+            buffered_samples = self._available_samples
+            state_name = self._state.name
+            snapshot = {
+                "state": state_name,
+                "buffered_samples": buffered_samples,
+                "buffered_ms": round(buffered_samples / (self.output_rate * self.channels) * 1000, 1),
+                "packet_count": self._input_packet_count,
+                "input_bytes_total": self._input_bytes_total,
+                "last_input_bytes": self._last_input_bytes,
+                "written_seconds": round(self._total_written_samples / (self.output_rate * self.channels), 2),
+                "played_seconds": round(self._total_played_samples / (self.output_rate * self.channels), 2),
+                "dropped_samples": self._dropped_samples,
+                "underflow_total": self._underflow_total,
+                "rebuffer_count": self._rebuffer_count,
+                "prefill_ready_count": self._prefill_ready_count,
+                "silence_callback_count": self._silence_callback_count,
+            }
+        return snapshot
+
+    def _audio_callback(self, outdata, frames, time_info, status):
+        """实时音频回调，只做读取、补零和状态切换。"""
+        needed = frames * self.channels
+        with self._lock:
+            available = self._ring_available()
+
+            if self._state == self._State.PREFILL:
+                outdata[:] = b"\x00" * (needed * 2)
+                self._silence_callback_count += 1
+                if available >= self._prefill_samples:
+                    self._state = self._State.PLAYING
+                    self._prefill_ready_count += 1
+                return
+
+            if self._state == self._State.REBUFFERING:
+                outdata[:] = b"\x00" * (needed * 2)
+                self._silence_callback_count += 1
+                if available >= self._resume_samples:
+                    self._state = self._State.PLAYING
+                    self._underflow_count = 0
+                    self._prefill_ready_count += 1
+                return
+
+            data = self._ring_read(needed)
+
+        data_len = int(data.size)
+        if data_len > 0:
+            outdata[:data_len * 2] = data.tobytes()
+
+        if data_len < needed:
+            outdata[data_len * 2:] = b"\x00" * ((needed - data_len) * 2)
+            self._underflow_count += 1
+            self._underflow_total += 1
+            # 句间间隔导致短暂underflow是正常的，需连续10次(200ms)才触发rebuffer
+            if self._underflow_count >= 10:
+                self._state = self._State.REBUFFERING
+                self._underflow_count = 0
+                self._rebuffer_count += 1
+        else:
+            self._underflow_count = 0
+
+    def _playback_loop(self):
+        """启动底层RawOutputStream并保持活跃。"""
+        try:
+            stream = sd.RawOutputStream(
+                device=self.device_index,
+                channels=self.channels,
+                samplerate=self.output_rate,
+                dtype='int16',
+                blocksize=960,
+                callback=self._audio_callback
+            )
+            stream.start()
+            logger.info("PCM输出流已启动: %sch @ %sHz → %s",
+                        self.channels, self.output_rate, sd.query_devices(self.device_index)['name'])
+
+            while self.is_running:
+                sd.sleep(100)
+
+            stream.stop()
+            stream.close()
+        except Exception as e:
+            logger.error(f"PCM输出流错误: {e}")
 
 
 if __name__ == "__main__":
